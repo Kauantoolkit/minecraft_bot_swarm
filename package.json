@@ -1,0 +1,29 @@
+{
+  "name": "minecraft-bot-swarm",
+  "version": "1.0.0",
+  "description": "Minecraft Swarm Orchestration — headless multi-bot controller",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "dependencies": {
+    "@miner-org/mineflayer-baritone": "^4.5.1",
+    "dotenv": "^16.4.5",
+    "mineflayer": "^4.37.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "prismarine-nbt": "^2.6.1",
+    "socks-proxy-agent": "^8.0.4",
+    "vec3": "^0.1.10"
+  },
+  "overrides": {
+    "axios": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

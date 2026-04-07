@@ -1,0 +1,6 @@
+# Lista de alvos para attack-list / pvp
+# Um username por linha — linhas com # são ignoradas
+#
+# Exemplo:
+# Notch
+# Herobrine
