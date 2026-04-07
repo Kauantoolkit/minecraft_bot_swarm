@@ -77,6 +77,72 @@ export class MineflayerAdapter {
   }
 
   /** Central Movements factory — always enables sprinting + swimming. */
+  /** 🔧 1.21 Physics Freeze Fix: Clamp NaN velocity to prevent physics sim crash. */
+  private clampVelocity(vec: Vec3): Vec3 {
+    return new Vec3(
+      isNaN(vec.x) || !isFinite(vec.x) ? 0 : vec.x,
+      isNaN(vec.y) || !isFinite(vec.y) ? 0 : vec.y,
+      isNaN(vec.z) || !isFinite(vec.z) ? 0 : vec.z
+    );
+  }
+
+  /** Vec3.isNaN polyfill for NaN velocity detection */
+  private vecIsNaN(vec: Vec3): boolean {
+    return isNaN(vec.x) || isNaN(vec.y) || isNaN(vec.z);
+  }
+
+  private installPhysicsPatches(domainBot: Bot): void {
+    const mfBot = domainBot.handle as MineflayerBot;
+    if (!mfBot?.entity) return;
+
+    const entity = mfBot.entity;
+    
+    // Patch 1: Override velocity setter → clamp NaN/inf (type-safe)
+    const oldVelocity = Object.getOwnPropertyDescriptor(entity, 'velocity');
+    if (oldVelocity?.set) {
+      const adapter = this;
+      Object.defineProperty(entity, 'velocity', {
+        set: function(v: Vec3) {
+          oldVelocity.set!.call(this, adapter.clampVelocity(v));
+        },
+        get: oldVelocity.get,
+        configurable: true
+      });
+    }
+
+    // Patch 2: Intercept entity_velocity packets → skip NaN (use _client.write → safer)
+    const clientWrite = mfBot._client.write.bind(mfBot._client);
+    mfBot._client.write = function(channel: string, packet: any) {
+      if (channel === 'play' && packet.name === 'entity_velocity') {
+        const velX = packet.params.velocityX / 8000.0;
+        const velY = packet.params.velocityY / 8000.0;
+        const velZ = packet.params.velocityZ / 8000.0;
+        if (isNaN(velX) || isNaN(velY) || isNaN(velZ)) {
+          console.warn(`[${ts()}] PhysicsPatch: Ignored NaN velocity packet for ${mfBot.username}`);
+          return; // drop packet
+        }
+      }
+      return clientWrite(channel, packet);
+    };
+
+    // Patch 3: Aggressive physics watchdog (50ms)
+    const watchdog = setInterval(() => {
+      if (!mfBot.entity?.velocity) return;
+      if (!mfBot.physicsEnabled) {
+        console.warn(`[${ts()}] PhysicsPatch: Forced physicsEnabled=true → ${mfBot.username}`);
+        mfBot.physicsEnabled = true;
+      }
+      if (this.vecIsNaN(mfBot.entity.velocity)) {
+        mfBot.entity.velocity = this.clampVelocity(mfBot.entity.velocity);
+        mfBot.clearControlStates();
+        console.log(`[${ts()}] PhysicsPatch: Clamped NaN velocity → ${mfBot.username}`);
+      }
+    }, 50);
+    mfBot.once('end', () => clearInterval(watchdog));
+
+    console.log(`[${ts()}] ✅ PhysicsPatches ACTIVE for ${domainBot.username}`);
+  }
+
   private createMovements(mfBot: MineflayerBot): Movements {
     const movements = new Movements(mfBot);
     movements.allowSprinting = true;
@@ -127,6 +193,10 @@ export class MineflayerAdapter {
         mfBot.clearControlStates();
         mfBot.pathfinder.stop();
         mfBot.pathfinder.setMovements(this.createMovements(mfBot));
+        
+        // 🔧 Physics freeze fix for 1.21 velocity NaN bug
+        this.installPhysicsPatches(domainBot);
+        
         domainBot.setState(BotState.CONNECTED);
         if (!resolved) {
           resolved = true;
@@ -156,6 +226,18 @@ export class MineflayerAdapter {
       mfBot.once('kicked', (reason: string) => {
         domainBot.setState(BotState.DISCONNECTED);
         console.warn(`[MineflayerAdapter] ${domainBot.username} kicked: ${reason}`);
+      });
+
+      // Health monitoring — auto-eat + log low health
+      mfBot.on('health', () => {
+        const health = mfBot.health;
+        if (health < 10) {
+          console.warn(`[${ts()}] ${domainBot.username}: Low health (${health}) → attempting eat`);
+          this.eat(domainBot).catch(() => {});
+        }
+        if (health <= 5) {
+          console.error(`[${ts()}] ${domainBot.username}: Critical health (${health})!`);
+        }
       });
 
       mfBot.once('end', (reason: string) => {
@@ -794,17 +876,21 @@ export class MineflayerAdapter {
     let defendState: DefendState = 'idle';
     let lastThreatId: number | null = null;
     let scanTick = 0;
+    let lastHurtTime = 0;
+    const HURT_COOLDOWN_MS = 1000;
 
     // React to damage only when idle or fleeing — during an active attack the
     // regular scan already handles the threat list every 5 ticks
     const onHurt = (entity: Entity) => {
       if (mfBot.entity && (entity as unknown as { id?: number }).id === mfBot.entity.id) {
-        if (defendState === 'attacking') {
-          console.log(`[${ts()}][Defend] ${domainBot.username}: took damage (state=attacking, scan suppressed)`);
+        const now = Date.now();
+        if (now - lastHurtTime < HURT_COOLDOWN_MS || defendState === 'attacking') {
+          console.log(`[${ts()}][Defend] ${domainBot.username}: hurt suppressed (cooldown/state=${defendState})`);
           return;
         }
-        console.log(`[${ts()}][Defend] ${domainBot.username}: took damage — triggering immediate scan (state=${defendState})`);
-        scanTick = 4;
+        lastHurtTime = now;
+        console.log(`[${ts()}][Defend] ${domainBot.username}: hurt → immediate scan (state=${defendState})`);
+        scanTick = 9; // %10==0 next tick
       }
     };
     mfBot.on('entityHurt', onHurt);
@@ -835,8 +921,8 @@ export class MineflayerAdapter {
         }
       }
 
-      // Entity scan every 5 ticks (4 Hz)
-      if (++scanTick % 5 !== 0) return;
+    // Entity scan every 10 ticks (2 Hz baseline)
+    if (++scanTick % 10 !== 0) return;
 
       // Priority 1 — creeper
       const creeper = Object.values(mfBot.entities).find((e) => {
