@@ -2,17 +2,6 @@ import mineflayer, { Bot as MineflayerBot } from 'mineflayer';
 import { Entity } from 'prismarine-entity';
 import { pathfinder, Movements, goals } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { loader: baritoneLoader, goals: barGoals } = require('@miner-org/mineflayer-baritone');
-
-/** Typed handle for the ashfinder API attached by the baritone plugin. */
-interface Ashfinder {
-  goto(goal: unknown): Promise<void>;
-  stop(): void;
-  isPathing: boolean;
-  enableBreaking(): void;
-  config: { breakBlocks: boolean; parkour: boolean };
-}
 import { Bot } from '../../domain/entities/Bot';
 import { BotState } from '../../domain/value-objects/BotState';
 import { ConnectionOptions } from '../network/NetworkProvider';
@@ -20,6 +9,12 @@ import { BuildQueue } from '../schematic/BuildQueue';
 import { QuarryQueue } from '../mining/QuarryQueue';
 import { SwarmIntel } from '../../application/SwarmIntel';
 import { PlayerRelationshipStore } from '../../domain/value-objects/PlayerRelationship';
+
+/** Returns current time as HH:MM:SS.mmm for log messages. */
+function ts(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}.${String(d.getMilliseconds()).padStart(3,'0')}`;
+}
 
 // Hostile mobs the defend mode will react to
 const HOSTILE_MOBS = new Set([
@@ -30,6 +25,12 @@ const HOSTILE_MOBS = new Set([
   'shulker', 'vex', 'evoker', 'zombie_villager', 'piglin_brute',
   'zoglin', 'hoglin', 'warden',
 ]);
+
+// Aerial mobs that cannot be reached by ground pathfinding.
+// For these, the bot stays in place and only swings when they swoop close enough,
+// instead of using GoalFollow which produces endless partial/noPath cycles and
+// leaves the bot jumping in the air trying to reach an unreachable position.
+const AERIAL_MOBS = new Set(['phantom', 'ghast', 'blaze', 'bat', 'bee', 'vex']);
 
 const CREEPER_FLEE_RADIUS = 7;
 
@@ -54,6 +55,8 @@ interface BotMeta {
   exploringActive?: boolean;
   /** Human-readable current mode for debug UI. */
   activeMode: string;
+
+  //talvez seja interessante logar o estado de cada um dos bots em um modo debug para que eu possa definir q exatamente esta deixando eles lentos ou stuck
 }
 
 export class MineflayerAdapter {
@@ -66,7 +69,11 @@ export class MineflayerAdapter {
 
   /** Returns the current active mode string for display in the debug UI. */
   getMode(bot: Bot): string {
-    return this.meta.get(bot)?.activeMode ?? 'idle';
+    const meta = this.meta.get(bot);
+    if (!meta) return 'idle';
+    const primary = meta.activeMode || 'idle';
+    const hasDefend = !!(meta as { defendListener?: unknown }).defendListener;
+    return hasDefend && !primary.startsWith('defend') ? `${primary}+defend` : primary;
   }
 
   /** Central Movements factory — always enables sprinting + swimming. */
@@ -77,7 +84,7 @@ export class MineflayerAdapter {
     // the direct swim path instead of routing far around rivers/lakes.
     // (Default is 1 which doubles the A* cost of every water block, causing
     //  bots to prefer 8-block detours over 5-block swims.)
-    (movements as unknown as Record<string, unknown>)['liquidCost'] = 0;
+    (movements as unknown as Record<string, unknown>)['liquidCost'] = 1;
     return movements;
   }
 
@@ -97,66 +104,28 @@ export class MineflayerAdapter {
       });
 
       mfBot.loadPlugin(pathfinder);
-      mfBot.loadPlugin(baritoneLoader);
       domainBot.attachHandle(mfBot);
 
-      // ── Float / stuck detector ─────────────────────────────────────────────
-      // Runs every 2 s. Fixes two symptoms:
-      //   1. Floating: bot is airborne with near-zero vertical velocity
-      //      (held jump key from a stuck pathfinder run) → clear jump.
-      //   2. Genuinely stuck: bot hasn't moved >0.5 blocks in 5 s while a
-      //      mode is active → clear all controls so gravity can take over.
-      let lastStuckPos: Vec3 | null = null;
-      let lastMoveTime = Date.now();
-      let stuckTick = 0;
-      // Consecutive ticks airborne with ~0 vertical velocity.
-      // A normal jump peaks in ~5 ticks; we need 10+ to distinguish floating.
-      let hoverTicks = 0;
-
-      mfBot.on('physicsTick', () => {
-        const entity = mfBot.entity;
-        if (!entity?.position) return;
-
-        // 1. Float fix — only after 10 consecutive hover-ticks (~0.5 s)
-        //    This avoids interrupting the peak of a normal jump (which also has vel.y≈0).
-        if (!entity.onGround) {
-          const vel = (entity as unknown as { velocity?: Vec3 }).velocity;
-          if (vel && Math.abs(vel.y) < 0.02) {
-            if (++hoverTicks >= 10) {
-              mfBot.setControlState('jump', false);
-            }
-          } else {
-            hoverTicks = 0; // still rising or falling normally
-          }
-        } else {
-          hoverTicks = 0;
+      // physicsTick is only emitted when physicsEnabled=true, so we can't use it as a watchdog.
+      // Use setInterval instead — runs on the JS event loop regardless of physics state.
+      const physicsGuard = setInterval(() => {
+        if (!mfBot.physicsEnabled) {
+          mfBot.physicsEnabled = true;
+          console.warn(`[${domainBot.username}] physicsEnabled was false — forced true`);
         }
-
-        // 2. Stuck check — every 40 ticks (2 s)
-        if (++stuckTick % 40 !== 0) return;
-        const pos = entity.position;
-        if (lastStuckPos && pos.distanceTo(lastStuckPos) > 0.5) {
-          lastStuckPos = pos.clone();
-          lastMoveTime = Date.now();
-          return;
-        }
-        lastStuckPos ??= pos.clone();
-        if (Date.now() - lastMoveTime > 5000) {
-          mfBot.clearControlStates();
-          const ash = (mfBot as unknown as { ashfinder?: Ashfinder }).ashfinder;
-          if (ash?.isPathing) ash.stop();
-          lastMoveTime = Date.now();
-          console.warn(`[Stuck] ${domainBot.username} unstuck`);
-        }
-      });
+      }, 500);
+      mfBot.once('end', () => clearInterval(physicsGuard));
 
       let resolved = false;
       mfBot.on('spawn', () => {
+        // Ensure physics is always on — plugins like baritone can leave it disabled
+        mfBot.physicsEnabled = true;
+        // Limit A* CPU: default tickTimeout=40ms × 10 bots = 400ms blocked per tick
+        mfBot.pathfinder.tickTimeout = 10;
+        (mfBot.pathfinder as unknown as Record<string, unknown>).searchRadius = 64;
         // Clear any stuck movement keys and active path from previous life
         mfBot.clearControlStates();
         mfBot.pathfinder.stop();
-        const ash = (mfBot as unknown as { ashfinder?: Ashfinder }).ashfinder;
-        if (ash?.isPathing) ash.stop();
         mfBot.pathfinder.setMovements(this.createMovements(mfBot));
         domainBot.setState(BotState.CONNECTED);
         if (!resolved) {
@@ -210,16 +179,28 @@ export class MineflayerAdapter {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
 
-    const ash = (mfBot as unknown as { ashfinder?: Ashfinder }).ashfinder;
-    if (!ash) throw new Error(`${domainBot.username}: ashfinder not loaded`);
-
-    // Stop any ongoing navigation before issuing a new one
-    if (ash.isPathing) ash.stop();
     mfBot.pathfinder.stop();
+    mfBot.pathfinder.setMovements(this.createMovements(mfBot));
 
     domainBot.setState(BotState.MOVING);
+    console.log(`[Move] ${domainBot.username} → (${x}, ${y}, ${z})`);
     try {
-      await ash.goto(new barGoals.GoalNear(x, y, z, 1));
+      await new Promise<void>((resolve, reject) => {
+        mfBot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 2));
+        const onReached = () => { cleanup(); resolve(); };
+        const onNoPath = (r: { status: string }) => {
+          if (r.status === 'noPath') { cleanup(); reject(new Error('noPath')); }
+        };
+        const onStopped = () => { cleanup(); resolve(); };
+        const cleanup = () => {
+          mfBot.removeListener('goal_reached', onReached);
+          (mfBot as NodeJS.EventEmitter).removeListener('path_update', onNoPath);
+          (mfBot as NodeJS.EventEmitter).removeListener('path_stop', onStopped);
+        };
+        mfBot.once('goal_reached', onReached);
+        (mfBot as NodeJS.EventEmitter).on('path_update', onNoPath);
+        (mfBot as NodeJS.EventEmitter).once('path_stop', onStopped);
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`${domainBot.username}: move failed — ${msg}`);
@@ -241,47 +222,81 @@ export class MineflayerAdapter {
     let currentEntityRef: Entity | null = null;
     let noPathRetry = 0;
     let scanTick = 0;
+    let wasVisible = false;
 
-    // Re-issue goal when entity reference changes or after a noPath recovery
     const setFollowGoal = (entity: Entity) => {
       currentEntityRef = entity;
       noPathRetry = 0;
       mfBot.pathfinder.setMovements(this.createMovements(mfBot));
       mfBot.pathfinder.setGoal(new goals.GoalFollow(entity, 2), true);
+      console.log(`[${ts()}][Follow] ${domainBot.username}: GoalFollow(${targetUsername}) issued`);
     };
 
-    // Recover from noPath: wait a few seconds and re-issue goal
     const onPathUpdate = (r: { status: string }) => {
-      if (r.status === 'noPath' && ++noPathRetry <= 5) {
-        const delay = 3000 * noPathRetry;
-        setTimeout(() => {
-          const entity = mfBot.players[targetUsername]?.entity;
-          if (entity) setFollowGoal(entity);
-        }, delay);
+      if (r.status === 'noPath') {
+        if (++noPathRetry <= 5) {
+          const delay = 3000 * noPathRetry;
+          console.warn(`[${ts()}][Follow] ${domainBot.username}: noPath → retry ${noPathRetry}/5 in ${delay / 1000}s`);
+          setTimeout(() => {
+            const entity = mfBot.players[targetUsername]?.entity;
+            if (entity) {
+              console.log(`[${ts()}][Follow] ${domainBot.username}: retrying GoalFollow after noPath`);
+              setFollowGoal(entity);
+            } else {
+              console.warn(`[${ts()}][Follow] ${domainBot.username}: retry ${noPathRetry} — target still not visible`);
+            }
+          }, delay);
+        } else {
+          console.error(`[${ts()}][Follow] ${domainBot.username}: noPath — max retries reached, giving up`);
+        }
+      } else if (r.status !== 'success' && r.status !== 'partialSuccess') {
+        console.log(`[${ts()}][Follow] ${domainBot.username}: path_update status=${r.status}`);
       }
     };
     (mfBot as NodeJS.EventEmitter).on('path_update', onPathUpdate);
     meta.followPathUpdateListener = onPathUpdate;
 
+    mfBot.on('goal_reached', () =>
+      console.log(`[${ts()}][Follow] ${domainBot.username}: goal_reached (within 2 of ${targetUsername})`));
+    mfBot.on('path_stop', () =>
+      console.log(`[${ts()}][Follow] ${domainBot.username}: path_stop event fired`));
+
     const tick = (): void => {
       if (++scanTick % 10 !== 0) return; // check at 2 Hz
 
       const entity = mfBot.players[targetUsername]?.entity;
-      if (!entity) return; // player not in range yet — wait
+      if (!entity) {
+        if (wasVisible) {
+          wasVisible = false;
+          console.warn(`[${ts()}][Follow] ${domainBot.username}: "${targetUsername}" left render range — waiting`);
+        }
+        return;
+      }
 
-      // Re-issue goal only when entity reference changes (e.g. teleport/respawn)
-      if (entity !== currentEntityRef) setFollowGoal(entity);
+      if (!wasVisible) {
+        wasVisible = true;
+        console.log(`[${ts()}][Follow] ${domainBot.username}: "${targetUsername}" came into range`);
+      }
+
+      if (entity !== currentEntityRef) {
+        console.log(`[${ts()}][Follow] ${domainBot.username}: entity ref changed (teleport/respawn?) → re-issuing goal`);
+        setFollowGoal(entity);
+      }
     };
 
     mfBot.on('physicsTick', tick);
     meta.pvpListener = tick;
 
     domainBot.setState(BotState.MOVING);
-    console.log(`[MineflayerAdapter] ${domainBot.username}: following ${targetUsername}`);
+    console.log(`[${ts()}][Follow] ${domainBot.username}: starting follow of "${targetUsername}"`);
 
-    // If player already visible, start immediately
     const entity = mfBot.players[targetUsername]?.entity;
-    if (entity) setFollowGoal(entity);
+    if (entity) {
+      wasVisible = true;
+      setFollowGoal(entity);
+    } else {
+      console.warn(`[${ts()}][Follow] ${domainBot.username}: "${targetUsername}" not visible yet — will engage on first sight`);
+    }
   }
 
   stop(domainBot: Bot): void {
@@ -293,9 +308,9 @@ export class MineflayerAdapter {
     this.stopExplore(domainBot);
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
+    mfBot.physicsEnabled = true;
     mfBot.pathfinder.stop();
-    const ash = (mfBot as unknown as { ashfinder?: Ashfinder }).ashfinder;
-    if (ash?.isPathing) ash.stop(); // also calls clearControlStates()
+    mfBot.clearControlStates();
     domainBot.setState(BotState.CONNECTED);
     this.getMeta(domainBot).activeMode = 'idle';
   }
@@ -400,7 +415,6 @@ export class MineflayerAdapter {
     if (meta.pvpListener) {
       mfBot.removeListener('physicsTick', meta.pvpListener);
       delete meta.pvpListener;
-      meta.activeMode = 'idle';
     }
     if (meta.followPathUpdateListener) {
       (mfBot as NodeJS.EventEmitter).removeListener('path_update', meta.followPathUpdateListener);
@@ -492,6 +506,11 @@ export class MineflayerAdapter {
       (mfBot as NodeJS.EventEmitter).removeListener('entityHurt', bgHurt);
       delete (meta as { _bgHurtListener?: () => void })._bgHurtListener;
     }
+    const bgPathUpdate = (meta as { _bgPathUpdateListener?: () => void })._bgPathUpdateListener;
+    if (bgPathUpdate) {
+      (mfBot as NodeJS.EventEmitter).removeListener('path_update', bgPathUpdate);
+      delete (meta as { _bgPathUpdateListener?: () => void })._bgPathUpdateListener;
+    }
   }
 
   // ─── Combat — Bodyguard mode ──────────────────────────────────────────────
@@ -502,6 +521,12 @@ export class MineflayerAdapter {
   bodyguard(domainBot: Bot, protectedUsername: string, radius: number, swarmUsernames: string[], relations?: PlayerRelationshipStore, intel?: SwarmIntel): void {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
+
+    // A bot cannot bodyguard itself — following own entity produces NaN positions
+    if (domainBot.username === protectedUsername) {
+      console.warn(`[Bodyguard] ${domainBot.username}: cannot bodyguard itself — skipping`);
+      return;
+    }
 
     const meta = this.getMeta(domainBot);
     if (meta.guardListener) mfBot.removeListener('physicsTick', meta.guardListener);
@@ -517,13 +542,40 @@ export class MineflayerAdapter {
     let currentFollowEntity: Entity | null = null;
 
     const setFollowWard = (ward: Entity) => {
-      // Always report fresh position to intel so other bots have current coords
+      if (isNaN(ward.position.x) || isNaN(ward.position.z)) {
+        console.warn(`[${ts()}][Bodyguard] ${domainBot.username}: ward has NaN position — skipping GoalFollow`);
+        return;
+      }
       intel?.report(domainBot.username, protectedUsername, ward.position);
       if (ward === currentFollowEntity && bgState === 'following') return;
+
+      const reason = currentFollowEntity === null ? 'previously null' : 'entity ref changed';
+      console.log(`[${ts()}][Bodyguard] ${domainBot.username}: setFollowWard → GoalFollow (${reason}), stop+setGoal`);
       currentFollowEntity = ward;
       bgState = 'following';
+      // Ensure physics are enabled before stopping — the pathfinder can leave
+      // physicsEnabled=false mid-path, which freezes the bot in place on stop()
+      mfBot.physicsEnabled = true;
+      mfBot.pathfinder.stop();
+      mfBot.clearControlStates();
+      mfBot.pathfinder.setMovements(this.createMovements(mfBot));
       mfBot.pathfinder.setGoal(new goals.GoalFollow(ward, 2), true);
     };
+
+    // path_update diagnostics — bodyguard needs to know when paths fail
+    const onPathUpdate = (r: { status: string }) => {
+      if (r.status === 'noPath') {
+        console.warn(`[${ts()}][Bodyguard] ${domainBot.username}: noPath — state=${bgState} ward=${mfBot.players[protectedUsername]?.entity ? 'visible' : 'NOT_VISIBLE'}`);
+        // Clear stuck keys — without this the bot may stay floating after a
+        // failed attempt to reach an aerial mob (phantom, etc.)
+        mfBot.clearControlStates();
+      } else if (r.status !== 'success' && r.status !== 'partial') {
+        // 'partial' is normal when chasing moving targets — suppress it to reduce spam
+        console.log(`[${ts()}][Bodyguard] ${domainBot.username}: path_update status=${r.status} state=${bgState}`);
+      }
+    };
+    (mfBot as NodeJS.EventEmitter).on('path_update', onPathUpdate);
+    (meta as { _bgPathUpdateListener?: (r: { status: string }) => void })._bgPathUpdateListener = onPathUpdate;
 
     // Start following if already in range, otherwise use intel or wait
     const ward0 = mfBot.players[protectedUsername]?.entity;
@@ -534,24 +586,32 @@ export class MineflayerAdapter {
       if (sighting) {
         bgState = 'heading-to-intel';
         mfBot.pathfinder.setGoal(new goals.GoalNear(sighting.position.x, sighting.position.y, sighting.position.z, 5));
-        console.log(`[Bodyguard] ${domainBot.username}: heading to last known pos of ${protectedUsername}`);
+        console.log(`[${ts()}][Bodyguard] ${domainBot.username}: "${protectedUsername}" not visible → heading to last known pos`);
       } else {
         bgState = 'waiting';
-        console.warn(`[Bodyguard] ${domainBot.username}: "${protectedUsername}" not visible, waiting...`);
+        console.warn(`[${ts()}][Bodyguard] ${domainBot.username}: "${protectedUsername}" not visible, no intel → waiting`);
       }
     }
 
-    // Immediate reaction when bot takes damage — trigger scan on next tick
-    const onHurt = (entity: Entity) => {
-      if (mfBot.entity && (entity as unknown as { id?: number }).id === mfBot.entity.id) {
-        scanTick = 4; // next ++scanTick = 5, 5%5=0 → scan fires immediately
-      }
-    };
-    mfBot.on('entityHurt', onHurt);
-    (meta as { _bgHurtListener?: (e: Entity) => void })._bgHurtListener = onHurt;
+    // React to damage only when not already attacking — triggering a scan during
+    // an active attack just causes target-switching noise with no benefit
+    // const onHurt = (entity: Entity) => {
+    //   if (mfBot.entity && (entity as unknown as { id?: number }).id === mfBot.entity.id) {
+    //     if (bgState === 'attacking') {
+    //       console.log(`[${ts()}][Bodyguard] ${domainBot.username}: took damage (state=attacking, scan suppressed)`);
+    //       return;
+    //     }
+    //     console.log(`[${ts()}][Bodyguard] ${domainBot.username}: took damage — triggering immediate threat scan`);
+    //     scanTick = 4; // next ++scanTick = 5, 5%5=0 → scan fires immediately
+    //   }
+    // };
+    // mfBot.on('entityHurt', onHurt);
+    // (meta as { _bgHurtListener?: (e: Entity) => void })._bgHurtListener = onHurt;
+
+    let heartbeatTick = 0;
+    let lastWardVisible = !!ward0;
 
     const tick = (): void => {
-      // Safety guard during death/respawn transition
       if (!mfBot.entity?.position) return;
 
       type AnyEntity = MineflayerBot['entity'] & { username?: string; type?: string; name?: string };
@@ -565,31 +625,74 @@ export class MineflayerAdapter {
       if (++scanTick % 5 !== 0) return;
 
       const ward = mfBot.players[protectedUsername]?.entity;
+      const wardVisible = !!ward;
+
+      // Log visibility changes immediately
+      if (wardVisible !== lastWardVisible) {
+        lastWardVisible = wardVisible;
+        if (wardVisible) {
+          console.log(`[${ts()}][Bodyguard] ${domainBot.username}: "${protectedUsername}" came into range (was ${bgState})`);
+        } else {
+          console.warn(`[${ts()}][Bodyguard] ${domainBot.username}: "${protectedUsername}" left render range (state=${bgState})`);
+        }
+      }
+
+      // Periodic heartbeat every ~5 seconds so we can see the bot is alive
+      if (++heartbeatTick % 50 === 0) {
+        const wardDist = ward ? Math.floor(ward.position.distanceTo(mfBot.entity.position)) : -1;
+        const pos = mfBot.entity.position;
+        let nearBot = 0, nearWard = 0;
+        for (const e of Object.values(mfBot.entities)) {
+          const en = e as AnyEntity;
+          if (!en.name || !HOSTILE_MOBS.has(en.name.toLowerCase())) continue;
+          if (ward && en.position.distanceTo(ward.position) < radius) nearWard++;
+          else if (en.position.distanceTo(pos) < radius) nearBot++;
+        }
+        console.log(`[${ts()}][Bodyguard] ${domainBot.username}: ♥ state=${bgState} ward=${wardVisible ? `dist=${wardDist}` : 'NOT_VISIBLE'} threats(nearWard=${nearWard} nearBot=${nearBot})`);
+      }
+
       if (!ward) {
-        // Player out of range — navigate to latest intel sighting or wait
         if (bgState !== 'heading-to-intel') {
           const sighting = intel?.getLastSighting(protectedUsername);
           if (sighting) {
+            const prev = bgState;
             bgState = 'heading-to-intel';
             lastThreatId = null;
             currentFollowEntity = null;
             mfBot.pathfinder.setGoal(new goals.GoalNear(sighting.position.x, sighting.position.y, sighting.position.z, 5));
+            console.log(`[${ts()}][Bodyguard] ${domainBot.username}: ${prev}→heading-to-intel @ (${Math.floor(sighting.position.x)},${Math.floor(sighting.position.y)},${Math.floor(sighting.position.z)}) age=${Math.floor((Date.now() - sighting.timestamp) / 1000)}s`);
           } else if (bgState !== 'waiting') {
+            const prev = bgState;
             bgState = 'waiting';
             lastThreatId = null;
             currentFollowEntity = null;
             mfBot.pathfinder.stop();
+            console.warn(`[${ts()}][Bodyguard] ${domainBot.username}: ${prev}→waiting (ward gone, no intel)`);
           }
         }
         return;
       }
 
-      // Player back in range — setFollowWard also broadcasts fresh intel
-      setFollowWard(ward);
+      // Broadcast fresh intel; only re-issue GoalFollow when not in combat
+      // (aerial-threat code calls setFollowWard explicitly with currentFollowEntity=null)
+      intel?.report(domainBot.username, protectedUsername, ward.position);
+      if (bgState !== 'attacking') setFollowWard(ward);
 
-      const threat = Object.values(mfBot.entities).find((e) => {
+      // Collect all threats within radius, split by ground vs aerial.
+      // Ground threats are prioritised: GoalFollow lets the bot close in and swing.
+      // Aerial threats are handled in-place (melee only, no pathfinding) so they
+      // never cause partial/noPath loops that leave the bot floating.
+      //
+      // Threat zone: within radius of the ward OR within radius of the bot itself.
+      // The ward may move ahead while mobs lag behind — those mobs fall outside the
+      // ward radius but are still actively attacking the bot, so we must include them.
+      const botPos = mfBot.entity.position;
+      const allThreats = Object.values(mfBot.entities).filter((e) => {
         const entity = e as AnyEntity;
-        if (entity.position.distanceTo(ward.position) >= radius) return false;
+        if (!mfBot.entity?.position) return false;
+        const nearWard = entity.position.distanceTo(ward.position) < radius;
+        const nearBot  = entity.position.distanceTo(botPos) < radius;
+        if (!nearWard && !nearBot) return false;
         if (HOSTILE_MOBS.has((entity.name ?? '').toLowerCase())) return true;
         if (entity.username) {
           if (entity.username === mfBot.username) return false;
@@ -603,16 +706,61 @@ export class MineflayerAdapter {
           return false;
         }
         return false;
-      }) as AnyEntity | undefined;
+      }) as AnyEntity[];
 
-      if (threat) {
-        if (bgState !== 'attacking' || lastThreatId !== threat.id) {
+      // Sticky targeting: keep current target as long as it's still alive and in
+      // radius. Only switch when it disappears — prevents target-flapping between
+      // two mobs of the same type (e.g. 74 zombies) which causes noPath cascades.
+      const currentTargetStillValid = lastThreatId !== null &&
+        allThreats.some(e => e.id === lastThreatId);
+      const groundThreat = allThreats.find(e => !AERIAL_MOBS.has((e.name ?? '').toLowerCase()));
+      const primaryThreat = currentTargetStillValid
+        ? allThreats.find(e => e.id === lastThreatId)!
+        : (groundThreat ?? allThreats[0]);
+
+      // Opportunity swing: hit any aerial mob that swoops within melee range,
+      // regardless of what the primary focus is. This handles phantom+zombie
+      // simultaneously without switching pathfinder goals.
+      if (mfBot.entity?.position) {
+        for (const e of allThreats) {
+          if (!AERIAL_MOBS.has((e.name ?? '').toLowerCase())) continue;
+          if (e.position.distanceTo(mfBot.entity.position) < 3.5) {
+            mfBot.attack(e as Parameters<MineflayerBot['attack']>[0]);
+          }
+        }
+      }
+
+      if (primaryThreat) {
+        const isAerial = AERIAL_MOBS.has((primaryThreat.name ?? '').toLowerCase());
+        if (bgState !== 'attacking' || lastThreatId !== primaryThreat.id) {
+          const prev = bgState;
           bgState = 'attacking';
-          lastThreatId = threat.id;
-          mfBot.pathfinder.setGoal(new goals.GoalFollow(threat, 1), true);
+          lastThreatId = primaryThreat.id;
+          if (isAerial) {
+            // Only aerial threats remain — navigate back to ward so the bot stays
+            // on solid ground. GoalFollow a flying mob causes partial/noPath loops
+            // and leaves the bot frozen wherever the previous path ended (mid-jump,
+            // stuck block, etc.). bgState stays 'attacking' so the scan doesn't
+            // call setFollowWard every tick and opportunity swings keep firing.
+            mfBot.pathfinder.setMovements(this.createMovements(mfBot));
+            mfBot.pathfinder.setGoal(new goals.GoalFollow(ward, 2), true);
+            console.log(`[${ts()}][Bodyguard] ${domainBot.username}: ${prev}→attacking aerial "${primaryThreat.name}" — following ward, melee-only on swoop`);
+          } else {
+            mfBot.pathfinder.setGoal(new goals.GoalFollow(primaryThreat, 1), true);
+            const aerialCount = allThreats.filter(e => AERIAL_MOBS.has((e.name ?? '').toLowerCase())).length;
+            const extra = aerialCount > 0 ? ` (+${aerialCount} aerial)` : '';
+            console.log(`[${ts()}][Bodyguard] ${domainBot.username}: ${prev}→attacking "${primaryThreat.name ?? primaryThreat.username ?? primaryThreat.id}" dist=${Math.floor(primaryThreat.position.distanceTo(ward.position))}m${extra}`);
+          }
         }
       } else if (bgState === 'attacking') {
         lastThreatId = null;
+        bgState = 'following';
+        currentFollowEntity = null;
+        // Restore physics before stopping in case the pathfinder disabled it
+        mfBot.physicsEnabled = true;
+        mfBot.pathfinder.stop();
+        mfBot.clearControlStates();
+        console.log(`[${ts()}][Bodyguard] ${domainBot.username}: attacking→following (all threats gone, stop+refollow)`);
         setFollowWard(ward);
       }
     };
@@ -647,24 +795,39 @@ export class MineflayerAdapter {
     let lastThreatId: number | null = null;
     let scanTick = 0;
 
-    // Immediate reaction when bot itself takes damage — trigger scan on next tick
+    // React to damage only when idle or fleeing — during an active attack the
+    // regular scan already handles the threat list every 5 ticks
     const onHurt = (entity: Entity) => {
       if (mfBot.entity && (entity as unknown as { id?: number }).id === mfBot.entity.id) {
-        scanTick = 4; // next ++scanTick=5, 5%5=0 → scan fires immediately
+        if (defendState === 'attacking') {
+          console.log(`[${ts()}][Defend] ${domainBot.username}: took damage (state=attacking, scan suppressed)`);
+          return;
+        }
+        console.log(`[${ts()}][Defend] ${domainBot.username}: took damage — triggering immediate scan (state=${defendState})`);
+        scanTick = 4;
       }
     };
     mfBot.on('entityHurt', onHurt);
     (meta as { _defendHurtListener?: (e: Entity) => void })._defendHurtListener = onHurt;
 
-    meta.activeMode = `defend:r${radius}`;
+    // Clear stuck keys when pathfinder gives up — prevents bot floating in air
+    const onDefendPathUpdate = (r: { status: string }) => {
+      if (r.status === 'noPath') {
+        console.warn(`[${ts()}][Defend] ${domainBot.username}: noPath (state=${defendState}) — clearing control states`);
+        mfBot.clearControlStates();
+      }
+    };
+    (mfBot as NodeJS.EventEmitter).on('path_update', onDefendPathUpdate);
+    (meta as { _defendPathUpdateListener?: (r: { status: string }) => void })._defendPathUpdateListener = onDefendPathUpdate;
+
+    // defend is a background mode — does not override the primary activeMode
 
     const tick = (): void => {
-      // Safety guard during death/respawn transition
       if (!mfBot.entity?.position) return;
 
       type AnyEntity = { type?: string; name?: string; position: Vec3; id: number };
 
-      // Attack is cheap — every tick while in combat
+      // Attack every tick while in combat
       if (defendState === 'attacking' && lastThreatId !== null) {
         const threat = mfBot.entities[lastThreatId] as AnyEntity | undefined;
         if (threat && threat.position.distanceTo(mfBot.entity.position) < 3.5) {
@@ -684,13 +847,17 @@ export class MineflayerAdapter {
 
       if (creeper) {
         if (defendState !== 'fleeing' || lastThreatId !== creeper.id) {
+          const prev = defendState;
           defendState = 'fleeing';
           lastThreatId = creeper.id;
-          console.warn(`[Defend] ${domainBot.username} — FLEEING creeper`);
-          const away = mfBot.entity.position.minus(creeper.position).normalize().scaled(20);
-          const ft = mfBot.entity.position.plus(away);
+          const dist = Math.floor(creeper.position.distanceTo(mfBot.entity.position));
+          console.warn(`[${ts()}][Defend] ${domainBot.username}: ${prev}→fleeing creeper id=${creeper.id} dist=${dist}m`);
+          const dx = mfBot.entity.position.x - creeper.position.x;
+          const dz = mfBot.entity.position.z - creeper.position.z;
+          const len = Math.sqrt(dx * dx + dz * dz) || 1;
+          const ft = mfBot.entity.position.plus(new Vec3((dx / len) * 20, 0, (dz / len) * 20));
           mfBot.pathfinder.setMovements(this.createMovements(mfBot));
-          mfBot.pathfinder.setGoal(new goals.GoalBlock(Math.floor(ft.x), Math.floor(ft.y), Math.floor(ft.z)));
+          mfBot.pathfinder.setGoal(new goals.GoalNear(Math.floor(ft.x), Math.floor(mfBot.entity.position.y), Math.floor(ft.z), 3));
         }
         return;
       }
@@ -699,28 +866,59 @@ export class MineflayerAdapter {
         defendState = 'idle';
         lastThreatId = null;
         mfBot.pathfinder.stop();
-        console.log(`[Defend] ${domainBot.username} — creeper gone`);
+        console.log(`[${ts()}][Defend] ${domainBot.username}: fleeing→idle (creeper gone)`);
       }
 
-      // Priority 2 — hostile mob (name-based check, same as bodyguard)
-      const mob = Object.values(mfBot.entities).find((e) => {
+      // Priority 2 — hostile mobs. Collect all, ground-first.
+      const allMobs = Object.values(mfBot.entities).filter((e) => {
         const entity = e as AnyEntity;
         return entity.name !== undefined &&
-          HOSTILE_MOBS.has((entity.name).toLowerCase()) &&
+          HOSTILE_MOBS.has(entity.name.toLowerCase()) &&
           entity.position.distanceTo(mfBot.entity.position) < radius;
-      }) as AnyEntity | undefined;
+      }) as AnyEntity[];
 
-      if (mob) {
-        if (defendState !== 'attacking' || lastThreatId !== mob.id) {
+      // Opportunity swing: hit aerial mobs that swoop within melee range
+      // without switching the primary pathfinding target
+      for (const e of allMobs) {
+        if (!AERIAL_MOBS.has((e.name ?? '').toLowerCase())) continue;
+        if (e.position.distanceTo(mfBot.entity.position) < 3.5) {
+          mfBot.attack(e as Parameters<MineflayerBot['attack']>[0]);
+        }
+      }
+
+      const currentMobStillValid = lastThreatId !== null &&
+        allMobs.some(e => e.id === lastThreatId);
+      const groundMob = allMobs.find(e => !AERIAL_MOBS.has((e.name ?? '').toLowerCase()));
+      const primaryMob = currentMobStillValid
+        ? allMobs.find(e => e.id === lastThreatId)!
+        : (groundMob ?? allMobs[0]);
+
+      if (primaryMob) {
+        if (defendState !== 'attacking' || lastThreatId !== primaryMob.id) {
+          const prev = defendState;
           defendState = 'attacking';
-          lastThreatId = mob.id;
-          mfBot.pathfinder.setMovements(this.createMovements(mfBot));
-          mfBot.pathfinder.setGoal(new goals.GoalFollow(mob as unknown as Entity, 1), true);
+          lastThreatId = primaryMob.id;
+          const isAerial = AERIAL_MOBS.has((primaryMob.name ?? '').toLowerCase());
+          if (isAerial) {
+            mfBot.pathfinder.stop();
+            mfBot.clearControlStates();
+            console.log(`[${ts()}][Defend] ${domainBot.username}: ${prev}→attacking aerial "${primaryMob.name}" — holding ground`);
+          } else {
+            mfBot.pathfinder.setMovements(this.createMovements(mfBot));
+            mfBot.pathfinder.setGoal(new goals.GoalFollow(primaryMob as unknown as Entity, 1), true);
+            const aerialCount = allMobs.filter(e => AERIAL_MOBS.has((e.name ?? '').toLowerCase())).length;
+            const extra = aerialCount > 0 ? ` (+${aerialCount} aerial)` : '';
+            console.log(`[${ts()}][Defend] ${domainBot.username}: ${prev}→attacking "${primaryMob.name ?? primaryMob.id}" dist=${Math.floor(primaryMob.position.distanceTo(mfBot.entity.position))}m${extra}`);
+          }
         }
       } else if (defendState === 'attacking') {
+        const deadStillInEntities = lastThreatId !== null && !!mfBot.entities[lastThreatId];
         defendState = 'idle';
         lastThreatId = null;
+        mfBot.physicsEnabled = true;
         mfBot.pathfinder.stop();
+        mfBot.clearControlStates();
+        console.log(`[${ts()}][Defend] ${domainBot.username}: attacking→idle (all mobs gone, entity still in world=${deadStillInEntities})`);
       }
     };
 
@@ -736,12 +934,17 @@ export class MineflayerAdapter {
     if (meta.defendListener) {
       mfBot.removeListener('physicsTick', meta.defendListener);
       delete meta.defendListener;
-      meta.activeMode = 'idle';
+      // defend is background — don't clear the primary activeMode
     }
     const hurtListener = (meta as { _defendHurtListener?: () => void })._defendHurtListener;
     if (hurtListener) {
       (mfBot as NodeJS.EventEmitter).removeListener('entityHurt', hurtListener);
       delete (meta as { _defendHurtListener?: () => void })._defendHurtListener;
+    }
+    const defendPathUpdate = (meta as { _defendPathUpdateListener?: () => void })._defendPathUpdateListener;
+    if (defendPathUpdate) {
+      (mfBot as NodeJS.EventEmitter).removeListener('path_update', defendPathUpdate);
+      delete (meta as { _defendPathUpdateListener?: () => void })._defendPathUpdateListener;
     }
     console.log(`[MineflayerAdapter] ${domainBot.username}: defend mode OFF`);
   }
@@ -1151,11 +1354,13 @@ export class MineflayerAdapter {
       const target = mfBot.entity.position.plus(dir.scaled(STEP));
 
       await new Promise<void>((res) => {
+        // GoalXZ navigates to X,Z regardless of terrain height — avoids bots
+        // getting stuck trying to reach an exact Y that doesn't exist in the terrain
         mfBot.pathfinder.setGoal(
-          new goals.GoalBlock(Math.floor(target.x), Math.floor(target.y), Math.floor(target.z)),
+          new goals.GoalXZ(Math.floor(target.x), Math.floor(target.z)),
         );
         mfBot.once('goal_reached', res);
-        setTimeout(res, 30000); // 30 s timeout per leg
+        setTimeout(() => { mfBot.pathfinder.stop(); res(); }, 30000); // 30 s timeout per leg
       });
     }
 

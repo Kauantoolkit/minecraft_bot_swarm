@@ -17,15 +17,26 @@ export class WebServer {
     this.server = http.createServer((req, res) => {
       try { this.handle(req, res); }
       catch (err) {
-        res.writeHead(500);
-        res.end('Internal error');
-        console.error('[WebServer]', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[WebServer] ${req.method} ${req.url} → 500: ${msg}`);
+        if (err instanceof Error) console.error(err.stack);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end(`Internal error: ${msg}`);
+        }
       }
     });
   }
 
   start(): void {
-    this.server.listen(this.port, () =>
+    this.server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`[WebServer] Port ${this.port} already in use — UI will not be available`);
+      } else {
+        console.error('[WebServer] Server error:', err.message);
+      }
+    });
+    this.server.listen(this.port, '0.0.0.0', () =>
       console.log(`[WebServer] Debug UI → http://localhost:${this.port}`),
     );
   }
