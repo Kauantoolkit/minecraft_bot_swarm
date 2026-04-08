@@ -59,14 +59,47 @@ Prefix any command with `@<target>` to send it to a subset of bots instead of al
 
 ---
 
+## Storage
+
+Registers known chest/barrel positions so bots can deposit and withdraw automatically.
+Labels and positions persist between restarts in `storages.json`.
+
+| Command | Description |
+|---|---|
+| `store register <label> <x> <y> <z>` | Register (or update) a chest position under a label |
+| `store remove <label>` | Remove a registered storage |
+| `store list` | List all registered storages with coordinates |
+| `store deposit [label\|nearest]` | Bots navigate to the chest and deposit their full inventory (tools with durability are skipped). Omit label to use the nearest registered chest |
+| `store withdraw <label> <item> [count]` | Bots navigate to the chest and withdraw the item (default count: 1) |
+
+**Examples:**
+```
+store register base 100 64 200
+store register mine_output -50 12 80
+store list
+store deposit base
+store withdraw base diamond_pickaxe
+```
+
+---
+
 ## Resource Collection
 
 | Command | Description |
 |---|---|
 | `collect <block> [count]` | All bots mine the nearest blocks of that type (default count: 1) |
 | `collect <block> [count] --vein` | Same, but also mines all connected blocks of the same type (vein mining) |
+| `collect <block> [count] [--vein] --store <label>` | Same as above, but when inventory is almost full (<5 empty slots) the bot deposits to the given storage and resumes mining |
 | `quarry <x1> <y1> <z1> <x2> <y2> <z2>` | Mines every block in the defined cuboid, top-down, distributed among all bots |
+| `quarry <x1> <y1> <z1> <x2> <y2> <z2> --store <label>` | Same as quarry but auto-deposits when inventory is almost full |
 | `farm <centerX> <centerZ> [radius]` | Bots continuously harvest fully-grown crops and replant seeds within the area (default radius: 30). Runs until `stop` |
+
+**Examples:**
+```
+collect diamond_ore 64 --store mine_output
+collect iron_ore 128 --vein --store base
+quarry 0 60 0 100 60 100 --store base
+```
 
 ### Block name examples
 ```

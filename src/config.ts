@@ -21,7 +21,7 @@ export const config = {
   swarm: {
     botCount: parseInt(requireEnv('BOT_COUNT', '10'), 10),
     usernamePrefix: requireEnv('BOT_USERNAME_PREFIX', 'SwarmBot'),
-    spawnDelayMs: parseInt(requireEnv('BOT_SPAWN_DELAY_MS', '1500'), 10),
+    spawnDelayMs: parseInt(requireEnv('BOT_SPAWN_DELAY_MS', '15'), 10),
   },
   connection: {
     mode: requireEnv('CONNECTION_MODE', 'direct') as 'direct' | 'proxy',

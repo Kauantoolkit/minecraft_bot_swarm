@@ -204,24 +204,85 @@ export class CommandListener {
 
       // ── Resources ─────────────────────────────────────────────────────────
       case 'collect': {
-        const [blockName, rawCount, flag] = args;
-        if (!blockName) { console.log('Usage: collect <blockName> [count] [--vein]'); break; }
+        // collect <block> [count] [--vein] [--store <label>]
+        const storeIdx = args.indexOf('--store');
+        const storageLabel = storeIdx >= 0 ? args[storeIdx + 1] : undefined;
+        const cleanArgs = storeIdx >= 0
+          ? args.filter((_, i) => i !== storeIdx && i !== storeIdx + 1)
+          : args;
+        const [blockName, rawCount, flag] = cleanArgs;
+        if (!blockName) { console.log('Usage: collect <blockName> [count] [--vein] [--store <label>]'); break; }
         const count = parseInt(rawCount, 10) || 1;
         if (flag === '--vein' || flag === 'vein') {
-          this.controller.collectVeinAll(blockName, count, target);
+          this.controller.collectVeinAll(blockName, count, storageLabel, target);
         } else {
-          this.controller.collectAll(blockName, count, target);
+          this.controller.collectAll(blockName, count, storageLabel, target);
         }
         break;
       }
 
       case 'quarry': {
-        const nums = args.map(Number);
+        // quarry <x1> <y1> <z1> <x2> <y2> <z2> [--store <label>]
+        const storeIdx = args.indexOf('--store');
+        const storageLabel = storeIdx >= 0 ? args[storeIdx + 1] : undefined;
+        const coordArgs = storeIdx >= 0
+          ? args.filter((_, i) => i !== storeIdx && i !== storeIdx + 1)
+          : args;
+        const nums = coordArgs.map(Number);
         if (nums.length < 6 || nums.some(isNaN)) {
-          console.log('Usage: quarry <x1> <y1> <z1> <x2> <y2> <z2>');
+          console.log('Usage: quarry <x1> <y1> <z1> <x2> <y2> <z2> [--store <label>]');
           break;
         }
-        this.controller.quarryAll(...(nums as [number,number,number,number,number,number]), target);
+        this.controller.quarryAll(...(nums as [number,number,number,number,number,number]), storageLabel, target);
+        break;
+      }
+
+      case 'store': {
+        const [sub, ...storeArgs] = args;
+        switch (sub) {
+          case 'register': {
+            // store register <label> <x> <y> <z>
+            const [label, sx, sy, sz] = storeArgs;
+            const [x, y, z] = [Number(sx), Number(sy), Number(sz)];
+            if (!label || isNaN(x) || isNaN(y) || isNaN(z)) {
+              console.log('Usage: store register <label> <x> <y> <z>');
+            } else {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { Vec3 } = require('vec3');
+              this.controller.storage.register(label, new Vec3(x, y, z));
+            }
+            break;
+          }
+          case 'remove': {
+            const [label] = storeArgs;
+            if (!label) { console.log('Usage: store remove <label>'); break; }
+            const removed = this.controller.storage.remove(label);
+            console.log(removed ? `[Storage] Removed "${label}"` : `[Storage] Label "${label}" not found`);
+            break;
+          }
+          case 'list': {
+            const entries = this.controller.storage.list();
+            if (entries.length === 0) { console.log('[Storage] No storages registered'); break; }
+            entries.forEach(({ label, pos }) =>
+              console.log(`  ${label.padEnd(20)} (${pos.x}, ${pos.y}, ${pos.z})`));
+            break;
+          }
+          case 'deposit': {
+            // store deposit [label|nearest]
+            const label = storeArgs[0] ?? 'nearest';
+            this.controller.depositAll(label, target);
+            break;
+          }
+          case 'withdraw': {
+            // store withdraw <label> <item> [count]
+            const [label, itemName, rawCount] = storeArgs;
+            if (!label || !itemName) { console.log('Usage: store withdraw <label> <item> [count]'); break; }
+            this.controller.withdraw(label, itemName, parseInt(rawCount, 10) || 1, target);
+            break;
+          }
+          default:
+            console.log('store register <label> <x> <y> <z> | store remove <label> | store list | store deposit [label] | store withdraw <label> <item> [count]');
+        }
         break;
       }
 
@@ -412,9 +473,16 @@ const HELP_TEXT = `
   defend off                    Disable defend/bodyguard
   avoid <p1> [p2] [--radius N]  Flee from specific players
 
+─── Storage ─────────────────────────────────────────────
+  store register <label> <x> <y> <z>  Register a chest
+  store remove <label>           Remove a chest
+  store list                     List registered chests
+  store deposit [label|nearest]  Deposit inventory to chest
+  store withdraw <label> <item> [count]  Withdraw from chest
+
 ─── Resources ───────────────────────────────────────────
-  collect <block> [count] [--vein]  Mine block (vein=connected chain)
-  quarry <x1> <y1> <z1> <x2> <y2> <z2>  Mine entire area
+  collect <block> [count] [--vein] [--store <label>]
+  quarry <x1> <y1> <z1> <x2> <y2> <z2> [--store <label>]
   farm <x> <z> [radius]         Auto-harvest+replant crops
   explore [n|s|e|w|auto]        Explore new chunks
 

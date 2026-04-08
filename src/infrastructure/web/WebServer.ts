@@ -83,9 +83,15 @@ export class WebServer {
     }));
     const friends = this.controller.relations.getFriends();
     const enemies = this.controller.relations.getEnemies();
+    const storages = this.controller.storage.list().map(s => ({
+      label: s.label,
+      x: s.pos.x,
+      y: s.pos.y,
+      z: s.pos.z,
+    }));
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ online, total: bots.length, bots, intel, friends, enemies }, null, 2));
+    res.end(JSON.stringify({ online, total: bots.length, bots, intel, friends, enemies, storages }, null, 2));
   }
 
   private apiCommand(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -143,6 +149,8 @@ const HTML_PAGE = `<!DOCTYPE html>
   .bot .state { color: #8b949e; font-size: 11px; }
   .bot.online .state { color: #3fb950; }
   .bot .mode { color: #e3b341; font-size: 11px; margin-top: 2px; }
+  .storage-row { padding: 4px 0; border-bottom: 1px solid #21262d; display: flex; gap: 12px; }
+  .storage-row:last-child { border: 0; }
   .intel-row { padding: 4px 0; border-bottom: 1px solid #21262d; display: flex; gap: 12px; }
   .intel-row:last-child { border: 0; }
   .lbl { color: #8b949e; min-width: 80px; }
@@ -180,9 +188,12 @@ const HTML_PAGE = `<!DOCTYPE html>
 <h2>Intel (last sightings)</h2>
 <div id="intel"></div>
 
+<h2>Storages</h2>
+<div id="storages"></div>
+
 <h2>Send Command</h2>
 <div class="cmd-bar">
-  <input id="cmd" type="text" placeholder="e.g. @builders defend 6" autocomplete="off" />
+  <input id="cmd" type="text" placeholder="e.g. store deposit base | @builders defend 6" autocomplete="off" />
   <button onclick="sendCmd()">Send</button>
 </div>
 <div id="cmd-log"></div>
@@ -271,7 +282,25 @@ async function refresh() {
           <span style="color:#6e7681">by \${s.spottedBy}</span>
         </div>\`).join('');
     }
+
+    // Storages
+    const storagesEl = document.getElementById('storages');
+    if (!data.storages || data.storages.length === 0) {
+      storagesEl.innerHTML = '<span style="color:#6e7681">No storages registered</span>';
+    } else {
+      storagesEl.innerHTML = data.storages.map(s => \`
+        <div class="storage-row">
+          <span class="lbl" style="color:#e3b341">\${escHtml(s.label)}</span>
+          <span>\${s.x}, \${s.y}, \${s.z}</span>
+          <button class="btn-sm" onclick="sendQuick('store deposit \${escHtml(s.label)}')">deposit</button>
+        </div>\`).join('');
+    }
   } catch { /* server may be starting */ }
+}
+
+async function sendQuick(cmd) {
+  document.getElementById('cmd').value = cmd;
+  await sendCmd();
 }
 
 async function sendCmd() {

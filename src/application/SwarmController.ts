@@ -4,9 +4,11 @@ import { MineflayerAdapter } from '../infrastructure/mineflayer/MineflayerAdapte
 import { SchematicLoader } from '../infrastructure/schematic/SchematicLoader';
 import { BuildQueue } from '../infrastructure/schematic/BuildQueue';
 import { QuarryQueue } from '../infrastructure/mining/QuarryQueue';
+import { StorageCache } from '../infrastructure/storage/StorageCache';
 import { SwarmIntel } from './SwarmIntel';
 import { PlayerRelationshipStore } from '../domain/value-objects/PlayerRelationship';
 import { Bot } from '../domain/entities/Bot';
+import { Vec3 } from 'vec3';
 
 const BUILD_MAX_PASSES = 5;
 const BUILD_PASS_DELAY_MS = 3000;
@@ -14,10 +16,11 @@ const BUILD_PASS_DELAY_MS = 3000;
 export type BotTarget = string[] | undefined; // usernames / IDs, undefined = all
 
 export class SwarmController implements ISwarmService {
-  private readonly buildQueue = new BuildQueue();
+  private readonly buildQueue  = new BuildQueue();
   private readonly quarryQueue = new QuarryQueue();
-  readonly intel = new SwarmIntel();
+  readonly intel     = new SwarmIntel();
   readonly relations = new PlayerRelationshipStore();
+  readonly storage   = new StorageCache();
 
   constructor(
     private readonly repository: IBotRepository,
@@ -121,35 +124,89 @@ export class SwarmController implements ISwarmService {
 
   // ─── Resources ────────────────────────────────────────────────────────────
 
-  collectAll(blockName: string, count: number, target?: BotTarget): void {
+  collectAll(blockName: string, count: number, storageLabel?: string, target?: BotTarget): void {
     const bots = this.resolve(target);
-    this.log(`collect(${blockName} x${count})`, bots);
+    this.log(`collect(${blockName} x${count}${storageLabel ? ` →${storageLabel}` : ''})`, bots);
     bots.forEach(bot => {
-      this.adapter.collect(bot, blockName, count).catch(err =>
+      const onFull = storageLabel ? this.makeDepositFn(storageLabel, bot) : undefined;
+      this.adapter.collect(bot, blockName, count, onFull).catch(err =>
         console.warn(`[Swarm] ${bot.username} collect error: ${err.message}`),
       );
     });
   }
 
-  collectVeinAll(blockName: string, count: number, target?: BotTarget): void {
+  collectVeinAll(blockName: string, count: number, storageLabel?: string, target?: BotTarget): void {
     const bots = this.resolve(target);
-    this.log(`collectVein(${blockName} x${count})`, bots);
+    this.log(`collectVein(${blockName} x${count}${storageLabel ? ` →${storageLabel}` : ''})`, bots);
     bots.forEach(bot => {
-      this.adapter.collectVein(bot, blockName, count).catch(err =>
+      const onFull = storageLabel ? this.makeDepositFn(storageLabel, bot) : undefined;
+      this.adapter.collectVein(bot, blockName, count, onFull).catch(err =>
         console.warn(`[Swarm] ${bot.username} vein error: ${err.message}`),
       );
     });
   }
 
-  quarryAll(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, target?: BotTarget): void {
+  quarryAll(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, storageLabel?: string, target?: BotTarget): void {
     const bots = this.resolve(target);
     this.quarryQueue.load(x1, y1, z1, x2, y2, z2);
-    this.log('quarry', bots);
+    this.log(`quarry${storageLabel ? ` →${storageLabel}` : ''}`, bots);
     bots.forEach(bot => {
-      this.adapter.quarryFromQueue(bot, this.quarryQueue).catch(err =>
+      const onFull = storageLabel ? this.makeDepositFn(storageLabel, bot) : undefined;
+      this.adapter.quarryFromQueue(bot, this.quarryQueue, onFull).catch(err =>
         console.warn(`[Swarm] ${bot.username} quarry error: ${err.message}`),
       );
     });
+  }
+
+  depositAll(storageLabel: string, target?: BotTarget): void {
+    const bots = this.resolve(target);
+    bots.forEach(bot => {
+      const chestPos = this.resolveChestPos(storageLabel, bot);
+      if (!chestPos) return;
+      this.adapter.depositAll(bot, chestPos).catch(err =>
+        console.warn(`[Swarm] ${bot.username} deposit error: ${err.message}`),
+      );
+    });
+  }
+
+  withdraw(storageLabel: string, itemName: string, count: number, target?: BotTarget): void {
+    const bots = this.resolve(target);
+    bots.forEach(bot => {
+      const chestPos = this.resolveChestPos(storageLabel, bot);
+      if (!chestPos) return;
+      this.adapter.withdraw(bot, chestPos, itemName, count).catch(err =>
+        console.warn(`[Swarm] ${bot.username} withdraw error: ${err.message}`),
+      );
+    });
+  }
+
+  // ─── Storage helpers ───────────────────────────────────────────────────────
+
+  private resolveChestPos(label: string, bot: Bot): Vec3 | null {
+    if (label === 'nearest') {
+      const mfBot = bot.handle as { entity?: { position?: Vec3 } } | null;
+      const botPos = mfBot?.entity?.position;
+      if (!botPos) return null;
+      return this.storage.getNearest(botPos)?.pos ?? null;
+    }
+    const pos = this.storage.getByLabel(label);
+    if (!pos) console.warn(`[Swarm] unknown storage label "${label}"`);
+    return pos;
+  }
+
+  private makeDepositFn(label: string, bot: Bot) {
+    return async (domainBot: Bot) => {
+      const mfBot = bot.handle as { entity?: { position?: Vec3 } } | null;
+      const botPos = mfBot?.entity?.position;
+      const chestPos = label === 'nearest' && botPos
+        ? this.storage.getNearest(botPos)?.pos
+        : this.storage.getByLabel(label);
+      if (!chestPos) {
+        console.warn(`[Swarm] ${domainBot.username}: no storage for label "${label}" — skipping deposit`);
+        return;
+      }
+      await this.adapter.depositAll(domainBot, chestPos);
+    };
   }
 
   farmAll(centerX: number, centerZ: number, radius: number, target?: BotTarget): void {
