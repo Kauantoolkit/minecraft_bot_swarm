@@ -1,6 +1,6 @@
 import { IBotRepository } from '../domain/repositories/IBotRepository';
 import { ISwarmService } from '../domain/services/ISwarmService';
-import { MineflayerAdapter } from '../infrastructure/mineflayer/MineflayerAdapter';
+import { IBotAdapter } from '../infrastructure/mineflayer/IBotAdapter';
 import { SchematicLoader } from '../infrastructure/schematic/SchematicLoader';
 import { BuildQueue } from '../infrastructure/schematic/BuildQueue';
 import { QuarryQueue } from '../infrastructure/mining/QuarryQueue';
@@ -24,7 +24,7 @@ export class SwarmController implements ISwarmService {
 
   constructor(
     private readonly repository: IBotRepository,
-    private readonly adapter: MineflayerAdapter,
+    private readonly adapter: IBotAdapter,
   ) {}
 
   /**

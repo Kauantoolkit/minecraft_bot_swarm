@@ -13,7 +13,54 @@ export function isInventoryFull(mfBot: MineflayerBot): boolean {
   return empty < INVENTORY_FULL_THRESHOLD;
 }
 
+const CHEST_BLOCK_NAMES = ['chest', 'trapped_chest', 'barrel', 'shulker_box',
+  'white_shulker_box', 'orange_shulker_box', 'magenta_shulker_box', 'light_blue_shulker_box',
+  'yellow_shulker_box', 'lime_shulker_box', 'pink_shulker_box', 'gray_shulker_box',
+  'light_gray_shulker_box', 'cyan_shulker_box', 'purple_shulker_box', 'blue_shulker_box',
+  'brown_shulker_box', 'green_shulker_box', 'red_shulker_box', 'black_shulker_box',
+];
+
 export class StorageBehavior {
+  /**
+   * Navigate to (x, y, z) and scan the surrounding area for chest/barrel blocks.
+   * Returns their positions so the caller can register them in StorageCache.
+   */
+  async scanNearbyChests(
+    domainBot: Bot,
+    x: number, y: number, z: number,
+    radius: number,
+  ): Promise<Array<{ x: number; y: number; z: number }>> {
+    const mfBot = domainBot.handle as MineflayerBot | null;
+    if (!mfBot) return [];
+
+    // Navigate to the scan centre
+    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    await new Promise<void>(res => {
+      mfBot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 3));
+      mfBot.once('goal_reached', res);
+      setTimeout(res, 20_000);
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mcData = require('minecraft-data')(mfBot.version);
+    const validIds = new Set<number>(
+      CHEST_BLOCK_NAMES.map((n: string) => (mcData.blocksByName[n] as { id: number } | undefined)?.id)
+        .filter((id): id is number => id !== undefined),
+    );
+
+    const found = (mfBot as unknown as {
+      findBlocks(opts: { matching: (b: { type: number }) => boolean; maxDistance: number; count: number }): Vec3[];
+    }).findBlocks({
+      matching: (b: { type: number }) => validIds.has(b.type),
+      maxDistance: radius,
+      count: 256,
+    });
+
+    console.log(`[Storage] ${domainBot.username}: found ${found.length} chest(s) within r=${radius} of (${x},${y},${z})`);
+    return found.map((v: Vec3) => ({ x: v.x, y: v.y, z: v.z }));
+  }
+
+
   /**
    * Navigate to a chest/barrel and deposit ALL items from the bot's inventory.
    * Skips tools (anything with durability) to avoid depositing equipped gear.

@@ -1,7 +1,7 @@
 import http from 'http';
 import { IBotRepository } from '../../domain/repositories/IBotRepository';
 import { SwarmController } from '../../application/SwarmController';
-import { MineflayerAdapter } from '../mineflayer/MineflayerAdapter';
+import { IBotAdapter } from '../mineflayer/IBotAdapter';
 import { recent as recentLogs } from '../LogBuffer';
 
 export class WebServer {
@@ -10,7 +10,7 @@ export class WebServer {
   constructor(
     private readonly repository: IBotRepository,
     private readonly controller: SwarmController,
-    private readonly adapter: MineflayerAdapter,
+    private readonly adapter: IBotAdapter,
     private readonly dispatch: (cmd: string) => void,
     private readonly port: number = 3000,
   ) {

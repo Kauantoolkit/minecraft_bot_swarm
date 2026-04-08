@@ -5,7 +5,8 @@ import { SwarmController } from './SwarmController';
 import { BotManager } from './BotManager';
 import { BotGroupStore } from './BotGroupStore';
 import { IBotRepository } from '../domain/repositories/IBotRepository';
-import { MineflayerAdapter } from '../infrastructure/mineflayer/MineflayerAdapter';
+import { IBotAdapter } from '../infrastructure/mineflayer/IBotAdapter';
+import { WorkerCommandAdapter } from '../worker/WorkerCommandAdapter';
 import { config } from '../config';
 import { Bot as MineflayerBot } from 'mineflayer';
 import { BotTarget } from './SwarmController';
@@ -18,7 +19,7 @@ export class CommandListener {
   constructor(
     private readonly controller: SwarmController,
     private readonly repository: IBotRepository,
-    private readonly adapter: MineflayerAdapter,
+    private readonly adapter: IBotAdapter,
     private readonly botManager: BotManager,
     private readonly groups: BotGroupStore,
   ) {}
@@ -46,7 +47,21 @@ export class CommandListener {
   }
 
   attachChatListeners(): void {
-    // Only attach to bots that don't have a listener yet (guard against double-attach on spawn)
+    if (this.adapter instanceof WorkerCommandAdapter) {
+      // Worker mode: chat events are forwarded from each worker as CHAT_MSG messages.
+      // We only need one global listener on the adapter — dedup is handled below.
+      this.adapter.on('chat_msg', (botId: string, username: string, message: string) => {
+        if (username !== config.master.username) return;
+        const now = Date.now();
+        if (message === this.lastChat.input && now - this.lastChat.time < 1000) return;
+        this.lastChat = { input: message, time: now };
+        console.log(`[CommandListener] Chat(worker) from ${username}: ${message}`);
+        this.dispatch(message);
+      });
+      return;
+    }
+
+    // Direct mode: attach to the mineflayer bot handle directly
     this.repository.findAll().forEach(domainBot => {
       const mfBot = domainBot.handle as MineflayerBot | null;
       if (!mfBot) return;
@@ -54,11 +69,10 @@ export class CommandListener {
       (mfBot as unknown as { _swarmChatAttached?: boolean })._swarmChatAttached = true;
       mfBot.on('chat', (username: string, message: string) => {
         if (username !== config.master.username) return;
-        // Deduplicate: many bots hear the same message simultaneously
         const now = Date.now();
         if (message === this.lastChat.input && now - this.lastChat.time < 1000) return;
         this.lastChat = { input: message, time: now };
-        console.log(`[CommandListener] Chat command from ${username}: ${message}`);
+        console.log(`[CommandListener] Chat from ${username}: ${message}`);
         this.dispatch(message);
       });
     });
@@ -280,8 +294,36 @@ export class CommandListener {
             this.controller.withdraw(label, itemName, parseInt(rawCount, 10) || 1, target);
             break;
           }
+          case 'scan': {
+            // store scan <label> <x> <y> <z> [radius=16]
+            // Sends ONE online bot to navigate to (x,y,z), scan for nearby chests
+            // within radius blocks, and auto-register all found positions as
+            // "<label>_0", "<label>_1", etc. in the StorageCache.
+            const [scanLabel, sx, sy, sz, sr] = storeArgs;
+            const [sx2, sy2, sz2] = [Number(sx), Number(sy), Number(sz)];
+            const radius = isNaN(Number(sr)) ? 16 : Number(sr);
+            if (!scanLabel || isNaN(sx2) || isNaN(sy2) || isNaN(sz2)) {
+              console.log('Usage: store scan <label> <x> <y> <z> [radius=16]');
+              break;
+            }
+            if (!(this.adapter instanceof WorkerCommandAdapter)) {
+              console.log('[Storage] store scan requires worker mode');
+              break;
+            }
+            const scanBots = this.repository.findAll().filter(b => b.isOnline());
+            if (scanBots.length === 0) { console.log('[Storage] No bots online'); break; }
+            const scanBot = scanBots[0];
+            console.log(`[Storage] ${scanBot.username} scanning for chests near (${sx2},${sy2},${sz2}) r=${radius}...`);
+            this.adapter.scanStorage(scanBot.id, sx2, sy2, sz2, radius)
+              .then(positions => {
+                const added = this.controller.storage.registerMany(scanLabel, positions);
+                console.log(`[Storage] Scan complete — ${added} new chest(s) registered under "${scanLabel}"`);
+              })
+              .catch(err => console.warn(`[Storage] Scan failed: ${err.message}`));
+            break;
+          }
           default:
-            console.log('store register <label> <x> <y> <z> | store remove <label> | store list | store deposit [label] | store withdraw <label> <item> [count]');
+            console.log('store register|remove|list|deposit|withdraw|scan');
         }
         break;
       }
@@ -474,11 +516,12 @@ const HELP_TEXT = `
   avoid <p1> [p2] [--radius N]  Flee from specific players
 
 ─── Storage ─────────────────────────────────────────────
-  store register <label> <x> <y> <z>  Register a chest
-  store remove <label>           Remove a chest
-  store list                     List registered chests
-  store deposit [label|nearest]  Deposit inventory to chest
-  store withdraw <label> <item> [count]  Withdraw from chest
+  store register <label> <x> <y> <z>           Register a single chest
+  store scan <label> <x> <y> <z> [radius=16]  Auto-scan area for chests (registers all found)
+  store remove <label>                         Remove a chest
+  store list                                   List registered chests
+  store deposit [label|nearest]                Deposit inventory to chest
+  store withdraw <label> <item> [count]        Withdraw from chest
 
 ─── Resources ───────────────────────────────────────────
   collect <block> [count] [--vein] [--store <label>]

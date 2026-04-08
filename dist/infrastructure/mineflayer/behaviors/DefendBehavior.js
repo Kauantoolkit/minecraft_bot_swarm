@@ -1,0 +1,203 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.DefendBehavior = void 0;
+const mineflayer_pathfinder_1 = require("mineflayer-pathfinder");
+const vec3_1 = require("vec3");
+const PhysicsPatch_1 = require("../physics/PhysicsPatch");
+const utils_1 = require("../utils");
+const constants_1 = require("./constants");
+class DefendBehavior {
+    constructor(meta) {
+        this.meta = meta;
+    }
+    /**
+     * Background self-defense mode.
+     *
+     * Runs independently of the primary mode (does not change activeMode).
+     * Priority order:
+     *   1. Creeper within CREEPER_FLEE_RADIUS → flee
+     *   2. Hostile mob within radius → chase + attack
+     *   3. Nothing → leave pathfinder untouched
+     *
+     * When returning to idle, calls meta.resumeCallback() so async modes
+     * (explore, farm) can restart their current leg immediately instead of
+     * waiting for their 30-second timeout.
+     */
+    start(domainBot, radius) {
+        const mfBot = domainBot.handle;
+        if (!mfBot)
+            return;
+        const meta = this.meta.get(domainBot);
+        if (meta.defendListener)
+            mfBot.removeListener('physicsTick', meta.defendListener);
+        if (meta._defendHurtListener) {
+            mfBot.removeListener('entityHurt', meta._defendHurtListener);
+        }
+        let defendState = 'idle';
+        let lastThreatId = null;
+        let scanTick = 0;
+        let lastHurtTime = 0;
+        const HURT_COOLDOWN_MS = 1000;
+        // React to damage — scan immediately with 2× radius to catch mobs that
+        // back away after attacking before the regular 10-tick scan fires.
+        const onHurt = (entity) => {
+            if (!mfBot.entity || entity.id !== mfBot.entity.id)
+                return;
+            const now = Date.now();
+            if (now - lastHurtTime < HURT_COOLDOWN_MS || defendState === 'attacking') {
+                console.log(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: hurt suppressed (cooldown/state=${defendState})`);
+                return;
+            }
+            lastHurtTime = now;
+            // Inline scan with 2× radius so we catch retreat-attackers
+            const extendedRadius = radius * 2;
+            const nearbyMob = Object.values(mfBot.entities).find(e => e.name !== undefined &&
+                constants_1.HOSTILE_MOBS.has(e.name.toLowerCase()) &&
+                e.position.distanceTo(mfBot.entity.position) < extendedRadius);
+            if (nearbyMob) {
+                const prev = defendState;
+                defendState = 'attacking';
+                lastThreatId = nearbyMob.id;
+                const dist = Math.floor(nearbyMob.position.distanceTo(mfBot.entity.position));
+                console.warn(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: hurt→attacking "${nearbyMob.name}" dist=${dist}m (extended scan)`);
+                if (!constants_1.AERIAL_MOBS.has((nearbyMob.name ?? '').toLowerCase())) {
+                    mfBot.pathfinder.setMovements((0, PhysicsPatch_1.createMovements)(mfBot));
+                    mfBot.pathfinder.setGoal(new mineflayer_pathfinder_1.goals.GoalFollow(nearbyMob, 1), true);
+                }
+                void prev;
+                return;
+            }
+            console.log(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: hurt → no mob in ${extendedRadius}m (environmental damage?)`);
+            scanTick = 9; // still trigger a regular scan next tick
+        };
+        mfBot.on('entityHurt', onHurt);
+        meta._defendHurtListener = onHurt;
+        // Clear stuck keys when pathfinder gives up
+        const onDefendPathUpdate = (r) => {
+            if (r.status === 'noPath') {
+                console.warn(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: noPath (state=${defendState}) — clearing control states`);
+                mfBot.clearControlStates();
+            }
+        };
+        mfBot.on('path_update', onDefendPathUpdate);
+        meta._defendPathUpdateListener = onDefendPathUpdate;
+        const tick = () => {
+            if (!mfBot.entity?.position)
+                return;
+            // Attack every tick while in combat
+            if (defendState === 'attacking' && lastThreatId !== null) {
+                const threat = mfBot.entities[lastThreatId];
+                if (threat && threat.position.distanceTo(mfBot.entity.position) < 3.5) {
+                    mfBot.attack(threat);
+                }
+            }
+            // Entity scan every 10 ticks (2 Hz baseline)
+            if (++scanTick % 10 !== 0)
+                return;
+            // Priority 1 — creeper
+            const creeper = Object.values(mfBot.entities).find((e) => {
+                const entity = e;
+                return entity.name === 'creeper' &&
+                    entity.position.distanceTo(mfBot.entity.position) < constants_1.CREEPER_FLEE_RADIUS;
+            });
+            if (creeper) {
+                if (defendState !== 'fleeing' || lastThreatId !== creeper.id) {
+                    const prev = defendState;
+                    defendState = 'fleeing';
+                    lastThreatId = creeper.id;
+                    const dist = Math.floor(creeper.position.distanceTo(mfBot.entity.position));
+                    console.warn(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: ${prev}→fleeing creeper id=${creeper.id} dist=${dist}m`);
+                    const dx = mfBot.entity.position.x - creeper.position.x;
+                    const dz = mfBot.entity.position.z - creeper.position.z;
+                    const len = Math.sqrt(dx * dx + dz * dz) || 1;
+                    const ft = mfBot.entity.position.plus(new vec3_1.Vec3((dx / len) * 20, 0, (dz / len) * 20));
+                    mfBot.pathfinder.setMovements((0, PhysicsPatch_1.createMovements)(mfBot));
+                    mfBot.pathfinder.setGoal(new mineflayer_pathfinder_1.goals.GoalNear(Math.floor(ft.x), Math.floor(mfBot.entity.position.y), Math.floor(ft.z), 3));
+                }
+                return;
+            }
+            if (defendState === 'fleeing') {
+                defendState = 'idle';
+                lastThreatId = null;
+                mfBot.pathfinder.stop();
+                console.log(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: fleeing→idle (creeper gone)`);
+            }
+            // Priority 2 — hostile mobs
+            const allMobs = Object.values(mfBot.entities).filter((e) => {
+                const entity = e;
+                return entity.name !== undefined &&
+                    constants_1.HOSTILE_MOBS.has(entity.name.toLowerCase()) &&
+                    entity.position.distanceTo(mfBot.entity.position) < radius;
+            });
+            // Opportunity swing: hit aerial mobs that swoop within melee range
+            for (const e of allMobs) {
+                if (!constants_1.AERIAL_MOBS.has((e.name ?? '').toLowerCase()))
+                    continue;
+                if (e.position.distanceTo(mfBot.entity.position) < 3.5) {
+                    mfBot.attack(e);
+                }
+            }
+            const currentMobStillValid = lastThreatId !== null && allMobs.some(e => e.id === lastThreatId);
+            const groundMob = allMobs.find(e => !constants_1.AERIAL_MOBS.has((e.name ?? '').toLowerCase()));
+            const primaryMob = currentMobStillValid
+                ? allMobs.find(e => e.id === lastThreatId)
+                : (groundMob ?? allMobs[0]);
+            if (primaryMob) {
+                if (defendState !== 'attacking' || lastThreatId !== primaryMob.id) {
+                    const prev = defendState;
+                    defendState = 'attacking';
+                    lastThreatId = primaryMob.id;
+                    const isAerial = constants_1.AERIAL_MOBS.has((primaryMob.name ?? '').toLowerCase());
+                    if (isAerial) {
+                        mfBot.pathfinder.stop();
+                        mfBot.clearControlStates();
+                        console.log(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: ${prev}→attacking aerial "${primaryMob.name}" — holding ground`);
+                    }
+                    else {
+                        mfBot.pathfinder.setMovements((0, PhysicsPatch_1.createMovements)(mfBot));
+                        mfBot.pathfinder.setGoal(new mineflayer_pathfinder_1.goals.GoalFollow(primaryMob, 1), true);
+                        const aerialCount = allMobs.filter(e => constants_1.AERIAL_MOBS.has((e.name ?? '').toLowerCase())).length;
+                        const extra = aerialCount > 0 ? ` (+${aerialCount} aerial)` : '';
+                        console.log(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: ${prev}→attacking "${primaryMob.name ?? primaryMob.id}" dist=${Math.floor(primaryMob.position.distanceTo(mfBot.entity.position))}m${extra}`);
+                    }
+                }
+            }
+            else if (defendState === 'attacking') {
+                const deadStillInEntities = lastThreatId !== null && !!mfBot.entities[lastThreatId];
+                defendState = 'idle';
+                lastThreatId = null;
+                mfBot.physicsEnabled = true;
+                mfBot.pathfinder.stop();
+                mfBot.clearControlStates();
+                console.log(`[${(0, utils_1.ts)()}][Defend] ${domainBot.username}: attacking→idle (all mobs gone, entity still in world=${deadStillInEntities})`);
+                meta.resumeCallback?.();
+            }
+        };
+        mfBot.on('physicsTick', tick);
+        meta.defendListener = tick;
+        console.log(`[MineflayerAdapter] ${domainBot.username}: defend mode ON (radius=${radius})`);
+    }
+    stop(domainBot) {
+        const mfBot = domainBot.handle;
+        if (!mfBot)
+            return;
+        const meta = this.meta.get(domainBot);
+        if (meta.defendListener) {
+            mfBot.removeListener('physicsTick', meta.defendListener);
+            delete meta.defendListener;
+        }
+        const hurtListener = meta._defendHurtListener;
+        if (hurtListener) {
+            mfBot.removeListener('entityHurt', hurtListener);
+            delete meta._defendHurtListener;
+        }
+        const pathUpdateListener = meta._defendPathUpdateListener;
+        if (pathUpdateListener) {
+            mfBot.removeListener('path_update', pathUpdateListener);
+            delete meta._defendPathUpdateListener;
+        }
+        console.log(`[MineflayerAdapter] ${domainBot.username}: defend mode OFF`);
+    }
+}
+exports.DefendBehavior = DefendBehavior;
+//# sourceMappingURL=DefendBehavior.js.map

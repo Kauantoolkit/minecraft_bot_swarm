@@ -21,7 +21,9 @@ import { InventoryBehavior } from './behaviors/InventoryBehavior';
 import { MiningBehavior, DepositFn } from './behaviors/MiningBehavior';
 import { BuildBehavior } from './behaviors/BuildBehavior';
 import { StorageBehavior } from './behaviors/StorageBehavior';
+import { CraftingBehavior } from './behaviors/CraftingBehavior';
 import { Vec3 } from 'vec3';
+import type { IBotAdapter } from './IBotAdapter';
 
 // Hostile mobs the defend mode will react to
 const HOSTILE_MOBS = new Set([
@@ -42,7 +44,7 @@ const AERIAL_MOBS = new Set(['phantom', 'ghast', 'blaze', 'bat', 'bee', 'vex']);
 const CREEPER_FLEE_RADIUS = 7;
 
 
-export class MineflayerAdapter {
+export class MineflayerAdapter implements IBotAdapter {
   private readonly metaStore = new MetaStore();
   private readonly movementBehavior  = new MovementBehavior(this.metaStore);
   private readonly combatBehavior    = new CombatBehavior(this.metaStore);
@@ -55,6 +57,7 @@ export class MineflayerAdapter {
   private readonly miningBehavior    = new MiningBehavior();
   private readonly buildBehavior     = new BuildBehavior();
   private readonly storageBehavior   = new StorageBehavior();
+  private readonly craftingBehavior  = new CraftingBehavior();
 
   private getMeta(bot: Bot): BotMeta {
     return this.metaStore.get(bot);
@@ -315,6 +318,53 @@ export class MineflayerAdapter {
 
   stopAvoid(domainBot: Bot): void {
     this.avoidBehavior.stopAvoid(domainBot);
+  }
+
+  // ─── Crafting ─────────────────────────────────────────────────────────────
+
+  craftItem(domainBot: Bot, itemName: string, count: number): Promise<void> {
+    return this.craftingBehavior.craft(domainBot, itemName, count);
+  }
+
+  /**
+   * Navigate to (x, y, z), equip a chest from inventory, and place it on the
+   * block below. Returns the final placed Vec3 or null on failure.
+   */
+  async placeChest(domainBot: Bot, x: number, y: number, z: number): Promise<Vec3 | null> {
+    const mfBot = domainBot.handle as MineflayerBot | null;
+    if (!mfBot) return null;
+
+    const chestItem = mfBot.inventory.items().find(
+      (i: { name: string }) => i.name === 'chest',
+    );
+    if (!chestItem) throw new Error('No chest in inventory');
+
+    // Navigate close enough to place
+    const { createMovements } = await import('./physics/PhysicsPatch');
+    const { goals } = await import('mineflayer-pathfinder');
+    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    await new Promise<void>(res => {
+      mfBot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 3));
+      mfBot.once('goal_reached', res);
+      setTimeout(res, 15_000);
+    });
+
+    const targetPos   = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
+    const belowTarget = mfBot.blockAt(targetPos.offset(0, -1, 0));
+    if (!belowTarget) throw new Error(`No block below (${x},${y},${z})`);
+
+    await mfBot.equip(chestItem as Parameters<MineflayerBot['equip']>[0], 'hand');
+    await mfBot.lookAt(targetPos, true);
+    await mfBot.placeBlock(belowTarget, new Vec3(0, 1, 0));
+
+    console.log(`[Adapter] ${domainBot.username}: placed chest at (${x},${y},${z})`);
+    return targetPos;
+  }
+
+  // ─── Storage scan (worker-safe) ───────────────────────────────────────────
+
+  scanNearbyChests(domainBot: Bot, x: number, y: number, z: number, radius: number): Promise<Array<{ x: number; y: number; z: number }>> {
+    return this.storageBehavior.scanNearbyChests(domainBot, x, y, z, radius);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

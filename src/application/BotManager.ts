@@ -2,7 +2,7 @@ import { Bot } from '../domain/entities/Bot';
 import { IBotRepository } from '../domain/repositories/IBotRepository';
 import { NetworkProvider } from '../infrastructure/network/NetworkProvider';
 import { ProxyLoader } from '../infrastructure/network/ProxyLoader';
-import { MineflayerAdapter } from '../infrastructure/mineflayer/MineflayerAdapter';
+import { IBotAdapter } from '../infrastructure/mineflayer/IBotAdapter';
 import { config } from '../config';
 
 export class BotManager {
@@ -10,7 +10,7 @@ export class BotManager {
     private readonly repository: IBotRepository,
     private readonly networkProvider: NetworkProvider,
     private readonly proxyLoader: ProxyLoader,
-    private readonly adapter: MineflayerAdapter,
+    private readonly adapter: IBotAdapter,
   ) {}
 
   async spawnSwarm(count: number): Promise<void> {
