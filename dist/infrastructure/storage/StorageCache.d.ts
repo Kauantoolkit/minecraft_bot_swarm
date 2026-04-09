@@ -22,6 +22,12 @@ export declare class StorageCache {
         label: string;
         pos: Vec3;
     }>;
+    /** Register multiple chests at once (from an auto-scan). Skips duplicates. */
+    registerMany(prefix: string, positions: Array<{
+        x: number;
+        y: number;
+        z: number;
+    }>): number;
     private load;
     private save;
 }

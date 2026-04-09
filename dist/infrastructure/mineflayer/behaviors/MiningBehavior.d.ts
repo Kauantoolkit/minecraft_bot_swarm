@@ -10,7 +10,7 @@ export declare class MiningBehavior {
      * Returns true if the block was successfully mined, false if already gone or unreachable.
      */
     private safeDig;
-    collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void>;
+    collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn, scaffold?: boolean): Promise<void>;
     collectVein(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void>;
     quarryFromQueue(domainBot: Bot, queue: QuarryQueue, onFull?: DepositFn): Promise<void>;
 }

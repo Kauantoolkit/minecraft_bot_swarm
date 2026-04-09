@@ -8,12 +8,12 @@ export type BotTarget = string[] | undefined;
 export declare class SwarmController implements ISwarmService {
     private readonly repository;
     private readonly adapter;
+    readonly storage: StorageCache;
     private readonly buildQueue;
     private readonly quarryQueue;
     readonly intel: SwarmIntel;
     readonly relations: PlayerRelationshipStore;
-    readonly storage: StorageCache;
-    constructor(repository: IBotRepository, adapter: IBotAdapter);
+    constructor(repository: IBotRepository, adapter: IBotAdapter, storage: StorageCache);
     /**
      * Resolve target to online bot list.
      * If target is undefined → all online bots.

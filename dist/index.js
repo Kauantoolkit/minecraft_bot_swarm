@@ -34,34 +34,56 @@ async function main() {
     const networkProvider = new NetworkProvider_1.NetworkProvider();
     const proxyLoader = new ProxyLoader_1.ProxyLoader();
     const storage = new StorageCache_1.StorageCache();
+    console.log('[Main] Core infrastructure initialized (repository, network, proxy loader, storage cache).');
     // This adapter spawns Worker threads — each bot is truly independent
     const adapter = new WorkerCommandAdapter_1.WorkerCommandAdapter();
+    console.log('[Main] Worker command adapter ready (one worker thread per bot).');
     proxyLoader.load(config_1.config.connection.proxyFile);
+    console.log(`[Main] Proxy configuration loaded from: ${config_1.config.connection.proxyFile}`);
     // ── Application ───────────────────────────────────────────────────────────
     const botManager = new BotManager_1.BotManager(repository, networkProvider, proxyLoader, adapter);
-    const controller = new SwarmController_1.SwarmController(repository, adapter);
+    const controller = new SwarmController_1.SwarmController(repository, adapter, storage);
     const groups = new BotGroupStore_1.BotGroupStore();
     const cmdListener = new CommandListener_1.CommandListener(controller, repository, adapter, botManager, groups);
-    const webServer = new WebServer_1.WebServer(repository, controller, adapter, cmd => cmdListener.dispatch(cmd), config_1.config.web.port);
+    console.log('[Main] Application services wired (bot manager, controller, groups, command listener).');
     // ── Orchestrator (autonomous colony brain) ────────────────────────────────
     const orchestrator = new Orchestrator_1.Orchestrator(adapter, repository, storage);
+    console.log('[Main] Orchestrator initialized with shared storage cache.');
+    const webServer = new WebServer_1.WebServer(repository, controller, adapter, cmd => cmdListener.dispatch(cmd), config_1.config.web.port, orchestrator);
+    console.log(`[Main] Web debug UI configured on port ${config_1.config.web.port}.`);
+    // When a bot autonomously builds and places chests, register them and
+    // set the storage position so the Orchestrator can start assigning deposits.
+    adapter.on('chests_placed', (_botId, label, positions) => {
+        const added = storage.registerMany(label, positions);
+        console.log(`[Main] ${added} chest(s) auto-registered under "${label}"`);
+        if (positions.length > 0 && !orchestrator.getState().storagePos) {
+            orchestrator.setStoragePos(positions[0].x, positions[0].y, positions[0].z);
+            console.log(`[Main] Storage pos set to first placed chest: (${positions[0].x}, ${positions[0].y}, ${positions[0].z})`);
+        }
+    });
     // When the operator sends a manual command, temporarily suspend autonomous
     // task assignment for the targeted bots so they don't get immediately
     // overridden by the next orchestrator tick.
     adapter.on('cmd_override', (botId) => orchestrator.pauseBot(botId));
     // ── Startup sequence ──────────────────────────────────────────────────────
     webServer.start();
+    console.log('[Main] Web server start requested.');
     // Spawn all bots (each gets its own Worker thread)
     await botManager.spawnSwarm(config_1.config.swarm.botCount);
+    console.log('[Main] Swarm spawn completed.');
     // After all bots have spawned, push the swarm username list to every worker
     const usernames = repository.findAll().map(b => b.username);
     adapter.broadcastSwarmUsernames(usernames);
+    console.log(`[Main] Broadcasted swarm usernames to workers: ${usernames.join(', ')}`);
     // Attach in-game chat listeners (works via worker CHAT_MSG events)
     cmdListener.attachChatListeners();
+    console.log('[Main] Chat listeners attached.');
     // Start autonomous orchestration
     orchestrator.start();
+    console.log('[Main] Orchestrator loop started.');
     // Start console REPL
     cmdListener.startConsole();
+    console.log('[Main] Console command listener started.');
     console.log(`[Main] All ${config_1.config.swarm.botCount} bot(s) running in dedicated threads.`);
 }
 main().catch(err => {

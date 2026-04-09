@@ -89,6 +89,16 @@ export type TaskDescriptor = {
         itemName: string;
         count: number;
     };
+} | {
+    id: string;
+    type: 'build_storage';
+    params: {
+        storageLabel: string;
+        centerX: number;
+        centerY: number;
+        centerZ: number;
+        chestCount: number;
+    };
 };
 export type MainToWorkerMsg = {
     type: 'STOP';
@@ -193,6 +203,13 @@ export type MainToWorkerMsg = {
     target: string;
     position: SerializedVec3;
     reportedBy: string;
+} | {
+    type: 'CMD_SCAN_STORAGE';
+    reqId: string;
+    x: number;
+    y: number;
+    z: number;
+    radius: number;
 };
 export type WorkerToMainMsg = {
     type: 'READY';
@@ -227,6 +244,10 @@ export type WorkerToMainMsg = {
     type: 'CHAT_MSG';
     username: string;
     message: string;
+} | {
+    type: 'CHESTS_PLACED';
+    label: string;
+    positions: SerializedVec3[];
 } | {
     type: 'LOG';
     level: 'info' | 'warn' | 'error';

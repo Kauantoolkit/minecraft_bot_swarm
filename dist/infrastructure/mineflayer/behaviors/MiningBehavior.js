@@ -125,6 +125,8 @@ class MiningBehavior {
         mfBot.clearControlStates();
         try {
             await mfBot.dig(block, true);
+            // Brief pause so the dropped item spawns and the bot can pick it up
+            await new Promise(r => setTimeout(r, 400));
             return true;
         }
         catch {
@@ -136,6 +138,7 @@ class MiningBehavior {
             mfBot.clearControlStates();
             try {
                 await mfBot.dig(retry, true);
+                await new Promise(r => setTimeout(r, 400));
                 return true;
             }
             catch {
@@ -144,7 +147,7 @@ class MiningBehavior {
         }
     }
     // ─── Public API ────────────────────────────────────────────────────────────
-    async collect(domainBot, blockName, count, onFull) {
+    async collect(domainBot, blockName, count, onFull, scaffold = false) {
         const mfBot = domainBot.handle;
         if (!mfBot)
             return;
@@ -155,23 +158,26 @@ class MiningBehavior {
             console.warn(`[Mining] ${domainBot.username}: unknown block "${blockName}"`);
             return;
         }
+        const movementsFn = scaffold ? PhysicsPatch_1.createScaffoldMovements : PhysicsPatch_1.createMovements;
         domainBot.setState(BotState_1.BotState.MOVING);
-        mfBot.pathfinder.setMovements((0, PhysicsPatch_1.createMovements)(mfBot));
+        mfBot.pathfinder.setMovements(movementsFn(mfBot));
         let collected = 0;
         while (collected < count) {
             if (onFull && (0, StorageBehavior_1.isInventoryFull)(mfBot)) {
                 console.log(`[Mining] ${domainBot.username}: inventory full — depositing`);
                 await onFull(domainBot);
-                mfBot.pathfinder.setMovements((0, PhysicsPatch_1.createMovements)(mfBot));
+                mfBot.pathfinder.setMovements(movementsFn(mfBot));
             }
             const block = mfBot.findBlock({
                 matching: b => b.type === blockType.id
-                    && !isBlockUnderwater(mfBot, b.position)
-                    && isBlockAccessible(mfBot, b.position),
-                maxDistance: 64,
+                    && !isBlockUnderwater(mfBot, b.position),
+                maxDistance: 128,
             });
             if (!block) {
-                console.warn(`[Mining] ${domainBot.username}: no accessible "${blockName}" in range`);
+                const pos = mfBot.entity?.position;
+                const posStr = pos ? `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}` : '?';
+                const rawBlock = mfBot.findBlock({ matching: b => b.name.includes('log'), maxDistance: 128 });
+                console.warn(`[Mining] ${domainBot.username}: no "${blockName}" in range (pos=${posStr}, anyLog=${rawBlock?.name ?? 'none'}@${rawBlock ? `${Math.floor(rawBlock.position.x)},${Math.floor(rawBlock.position.y)},${Math.floor(rawBlock.position.z)}` : '?'})`);
                 break;
             }
             const mined = await this.safeDig(mfBot, block.position, blockName, mcData);
@@ -179,11 +185,20 @@ class MiningBehavior {
                 collected++;
                 console.log(`[Mining] ${domainBot.username}: ${blockName} ${collected}/${count}`);
                 await escapeWaterIfNeeded(mfBot, domainBot.username);
-                mfBot.pathfinder.setMovements((0, PhysicsPatch_1.createMovements)(mfBot));
+                mfBot.pathfinder.setMovements(movementsFn(mfBot));
             }
         }
         await escapeWaterIfNeeded(mfBot, domainBot.username);
+        // Always deposit after a collect run if a chest is configured, even if
+        // we collected fewer blocks than requested (ran out of accessible blocks).
+        if (collected > 0 && onFull) {
+            console.log(`[Mining] ${domainBot.username}: collect done (${collected}/${count}) — depositing`);
+            await onFull(domainBot);
+        }
         domainBot.setState(BotState_1.BotState.CONNECTED);
+        if (collected === 0) {
+            throw new Error(`No accessible "${blockName}" found within range`);
+        }
     }
     async collectVein(domainBot, blockName, count, onFull) {
         const mfBot = domainBot.handle;
@@ -235,17 +250,19 @@ class MiningBehavior {
                 break;
             const block = mfBot.findBlock({
                 matching: b => b.type === blockType.id
-                    && !isBlockUnderwater(mfBot, b.position)
-                    && isBlockAccessible(mfBot, b.position),
-                maxDistance: 64,
+                    && !isBlockUnderwater(mfBot, b.position),
+                maxDistance: 128,
             });
             if (!block) {
-                console.warn(`[Mining] ${domainBot.username}: no accessible "${blockName}" in range`);
+                console.warn(`[Mining] ${domainBot.username}: no "${blockName}" in range`);
                 break;
             }
             await tryDigAt(block.position);
         }
         domainBot.setState(BotState_1.BotState.CONNECTED);
+        if (collected === 0) {
+            throw new Error(`No accessible "${blockName}" found within range`);
+        }
     }
     async quarryFromQueue(domainBot, queue, onFull) {
         const mfBot = domainBot.handle;

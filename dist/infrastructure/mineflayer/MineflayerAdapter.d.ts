@@ -20,6 +20,7 @@ export declare class MineflayerAdapter implements IBotAdapter {
     private readonly miningBehavior;
     private readonly buildBehavior;
     private readonly storageBehavior;
+    private readonly craftingBehavior;
     private getMeta;
     /** Returns the current active mode string for display in the debug UI. */
     getMode(bot: Bot): string;
@@ -37,7 +38,7 @@ export declare class MineflayerAdapter implements IBotAdapter {
     bodyguard(domainBot: Bot, protectedUsername: string, radius: number, swarmUsernames: string[], relations?: PlayerRelationshipStore, intel?: SwarmIntel): void;
     startDefend(domainBot: Bot, radius: number): void;
     stopDefend(domainBot: Bot): void;
-    collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void>;
+    collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn, scaffold?: boolean): Promise<void>;
     collectVein(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void>;
     quarryFromQueue(domainBot: Bot, queue: QuarryQueue, onFull?: DepositFn): Promise<void>;
     depositAll(domainBot: Bot, chestPos: Vec3): Promise<void>;
@@ -51,6 +52,17 @@ export declare class MineflayerAdapter implements IBotAdapter {
     stopExplore(domainBot: Bot): void;
     avoid(domainBot: Bot, targetUsernames: string[], triggerRadius: number): void;
     stopAvoid(domainBot: Bot): void;
+    craftItem(domainBot: Bot, itemName: string, count: number): Promise<void>;
+    /**
+     * Navigate to (x, y, z), equip a chest from inventory, and place it on the
+     * block below. Returns the final placed Vec3 or null on failure.
+     */
+    placeChest(domainBot: Bot, x: number, y: number, z: number): Promise<Vec3 | null>;
+    scanNearbyChests(domainBot: Bot, x: number, y: number, z: number, radius: number): Promise<Array<{
+        x: number;
+        y: number;
+        z: number;
+    }>>;
     private autoEquipToolFor;
 }
 //# sourceMappingURL=MineflayerAdapter.d.ts.map

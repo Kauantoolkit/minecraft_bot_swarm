@@ -343,6 +343,14 @@ const HTML_PAGE = `<!DOCTYPE html>
   .intel-row:last-child{border:0}
 
   #refresh-ts{color:#484f58;font-size:10px}
+
+  /* Frontend debug */
+  #debug-panel{background:#010409;border:1px solid #21262d;border-radius:6px;
+    padding:8px;height:140px;overflow-y:auto;font-size:11px}
+  .debug-line{padding:1px 0}
+  .debug-info{color:#8b949e}
+  .debug-warn{color:#e3b341}
+  .debug-error{color:#f85149}
 </style>
 </head>
 <body>
@@ -423,6 +431,9 @@ const HTML_PAGE = `<!DOCTYPE html>
 </div>
 <div id="log-panel"></div>
 
+<h2>Frontend Debug</h2>
+<div id="debug-panel"></div>
+
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
 let orchData   = { available: false, autonomous: true, phase: 'bootstrap', bots: [], pausedIds: [] };
@@ -431,21 +442,67 @@ let logData    = [];
 let clearedBefore = 0;
 let selectedBotId = null;
 let autoOn = true;
+let debugEvents = [];
+const MAX_DEBUG_EVENTS = 120;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 function ts(ms) { return new Date(ms).toLocaleTimeString(); }
+function debug(level, msg, data) {
+  const line = {
+    level: level || 'info',
+    text: msg + (typeof data === 'undefined' ? '' : ' ' + JSON.stringify(data)),
+    time: Date.now(),
+  };
+  debugEvents.push(line);
+  if (debugEvents.length > MAX_DEBUG_EVENTS) debugEvents = debugEvents.slice(-MAX_DEBUG_EVENTS);
+
+  if (line.level === 'error') console.error('[UI]', msg, data ?? '');
+  else if (line.level === 'warn') console.warn('[UI]', msg, data ?? '');
+  else console.info('[UI]', msg, data ?? '');
+
+  renderDebug();
+}
+
+function renderDebug() {
+  const panel = document.getElementById('debug-panel');
+  if (!panel) return;
+  panel.innerHTML = debugEvents.map(e =>
+    '<div class="debug-line debug-' + e.level + '">[' + ts(e.time) + '] ' + esc(e.text) + '</div>'
+  ).join('');
+  panel.scrollTop = panel.scrollHeight;
+}
+
+async function fetchJson(url, options, tag) {
+  const start = performance.now();
+  const name = tag || url;
+  try {
+    debug('info', 'request:start', { name, url });
+    const res = await fetch(url, options);
+    const ms = Math.round(performance.now() - start);
+    if (!res.ok) {
+      debug('warn', 'request:non_ok', { name, url, status: res.status, ms });
+    } else {
+      debug('info', 'request:ok', { name, status: res.status, ms });
+    }
+    const json = await res.json();
+    return json;
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    debug('error', 'request:failed', { name, url, error: message });
+    throw err;
+  }
+}
 
 // ── Orchestrator API ───────────────────────────────────────────────────────
 async function orchPost(body) {
-  const r = await fetch('/api/orch', {
+  return fetchJson('/api/orch', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify(body),
-  });
-  return r.json();
+  }, 'orchPost');
 }
 
 async function toggleAuto() {
@@ -485,14 +542,18 @@ async function resumeBot(botId) {
 async function sendRaw(cmd) {
   const log = document.getElementById('cmd-log');
   try {
-    const r = await fetch('/api/command', {
+    const data = await fetchJson('/api/command', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ command: cmd }),
-    });
-    const data = await r.json();
+    }, 'sendRaw');
     log.textContent = data.ok ? '> ' + cmd : 'Error: ' + data.error;
-  } catch(e) { log.textContent = 'Network error'; }
+    debug('info', 'command:result', { cmd, ok: !!data.ok, error: data.error ?? null });
+  } catch(e) {
+    log.textContent = 'Network error';
+    const message = e && e.message ? e.message : String(e);
+    debug('error', 'command:network_error', { cmd, error: message });
+  }
 }
 
 async function sendCmd() {
@@ -748,15 +809,18 @@ function downloadLog() {
 
 // ── Refresh loops ──────────────────────────────────────────────────────────
 async function refreshOrch() {
-  try { orchData = await fetch('/api/orch').then(r => r.json()); } catch {}
+  try { orchData = await fetchJson('/api/orch', undefined, 'refreshOrch'); }
+  catch {}
 }
 
 async function refreshStatus() {
-  try { statusData = await fetch('/api/status').then(r => r.json()); } catch {}
+  try { statusData = await fetchJson('/api/status', undefined, 'refreshStatus'); }
+  catch {}
 }
 
 async function refreshLog() {
-  try { logData = await fetch('/api/log?n=300').then(r => r.json()); } catch {}
+  try { logData = await fetchJson('/api/log?n=300', undefined, 'refreshLog'); }
+  catch {}
 }
 
 async function tick() {
@@ -775,6 +839,7 @@ document.getElementById('cmd').addEventListener('keydown', e => { if (e.key==='E
 ['filter-info','filter-warn','filter-error'].forEach(id =>
   document.getElementById(id).addEventListener('change', renderLog));
 
+debug('info', 'frontend:init', { refreshMs: 2000 });
 tick();
 setInterval(tick, 2000);
 </script>

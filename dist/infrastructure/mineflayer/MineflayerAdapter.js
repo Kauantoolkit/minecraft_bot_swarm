@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -21,6 +54,8 @@ const InventoryBehavior_1 = require("./behaviors/InventoryBehavior");
 const MiningBehavior_1 = require("./behaviors/MiningBehavior");
 const BuildBehavior_1 = require("./behaviors/BuildBehavior");
 const StorageBehavior_1 = require("./behaviors/StorageBehavior");
+const CraftingBehavior_1 = require("./behaviors/CraftingBehavior");
+const vec3_1 = require("vec3");
 // Hostile mobs the defend mode will react to
 const HOSTILE_MOBS = new Set([
     'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman',
@@ -50,6 +85,7 @@ class MineflayerAdapter {
         this.miningBehavior = new MiningBehavior_1.MiningBehavior();
         this.buildBehavior = new BuildBehavior_1.BuildBehavior();
         this.storageBehavior = new StorageBehavior_1.StorageBehavior();
+        this.craftingBehavior = new CraftingBehavior_1.CraftingBehavior();
     }
     getMeta(bot) {
         return this.metaStore.get(bot);
@@ -99,6 +135,8 @@ class MineflayerAdapter {
                 mfBot.pathfinder.setMovements((0, PhysicsPatch_1.createMovements)(mfBot));
                 // 🔧 Physics freeze fix for 1.21 velocity NaN bug
                 (0, PhysicsPatch_1.installPhysicsPatches)(domainBot);
+                // Auto-defend: always active from first spawn so bots aren't defenceless.
+                this.defendBehavior.start(domainBot, 16);
                 domainBot.setState(BotState_1.BotState.CONNECTED);
                 if (!resolved) {
                     resolved = true;
@@ -218,8 +256,8 @@ class MineflayerAdapter {
     }
     // ─── Resource collection ──────────────────────────────────────────────────
     // ─── Resource collection ──────────────────────────────────────────────────
-    collect(domainBot, blockName, count, onFull) {
-        return this.miningBehavior.collect(domainBot, blockName, count, onFull);
+    collect(domainBot, blockName, count, onFull, scaffold = false) {
+        return this.miningBehavior.collect(domainBot, blockName, count, onFull, scaffold);
     }
     collectVein(domainBot, blockName, count, onFull) {
         return this.miningBehavior.collectVein(domainBot, blockName, count, onFull);
@@ -264,6 +302,45 @@ class MineflayerAdapter {
     }
     stopAvoid(domainBot) {
         this.avoidBehavior.stopAvoid(domainBot);
+    }
+    // ─── Crafting ─────────────────────────────────────────────────────────────
+    craftItem(domainBot, itemName, count) {
+        return this.craftingBehavior.craft(domainBot, itemName, count);
+    }
+    /**
+     * Navigate to (x, y, z), equip a chest from inventory, and place it on the
+     * block below. Returns the final placed Vec3 or null on failure.
+     */
+    async placeChest(domainBot, x, y, z) {
+        const mfBot = domainBot.handle;
+        if (!mfBot)
+            return null;
+        const chestItem = mfBot.inventory.items().find((i) => i.name === 'chest');
+        if (!chestItem)
+            throw new Error('No chest in inventory');
+        // Navigate close enough to place
+        const { createDryMovements } = await Promise.resolve().then(() => __importStar(require('./physics/PhysicsPatch')));
+        const { goals } = await Promise.resolve().then(() => __importStar(require('mineflayer-pathfinder')));
+        // Chest placement should avoid water paths to prevent drown/stuck loops.
+        mfBot.pathfinder.setMovements(createDryMovements(mfBot));
+        await new Promise(res => {
+            mfBot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 3));
+            mfBot.once('goal_reached', res);
+            setTimeout(res, 15000);
+        });
+        const targetPos = new vec3_1.Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
+        const belowTarget = mfBot.blockAt(targetPos.offset(0, -1, 0));
+        if (!belowTarget)
+            throw new Error(`No block below (${x},${y},${z})`);
+        await mfBot.equip(chestItem, 'hand');
+        await mfBot.lookAt(targetPos, true);
+        await mfBot.placeBlock(belowTarget, new vec3_1.Vec3(0, 1, 0));
+        console.log(`[Adapter] ${domainBot.username}: placed chest at (${x},${y},${z})`);
+        return targetPos;
+    }
+    // ─── Storage scan (worker-safe) ───────────────────────────────────────────
+    scanNearbyChests(domainBot, x, y, z, radius) {
+        return this.storageBehavior.scanNearbyChests(domainBot, x, y, z, radius);
     }
     // ─── Helpers ──────────────────────────────────────────────────────────────
     async autoEquipToolFor(mfBot, block, mcData) {
