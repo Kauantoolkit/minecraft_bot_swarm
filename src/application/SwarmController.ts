@@ -20,11 +20,11 @@ export class SwarmController implements ISwarmService {
   private readonly quarryQueue = new QuarryQueue();
   readonly intel     = new SwarmIntel();
   readonly relations = new PlayerRelationshipStore();
-  readonly storage   = new StorageCache();
 
   constructor(
     private readonly repository: IBotRepository,
     private readonly adapter: IBotAdapter,
+    readonly storage: StorageCache,
   ) {}
 
   /**

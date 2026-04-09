@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   // ── Application ───────────────────────────────────────────────────────────
 
   const botManager  = new BotManager(repository, networkProvider, proxyLoader, adapter);
-  const controller  = new SwarmController(repository, adapter);
+  const controller  = new SwarmController(repository, adapter, storage);
   const groups      = new BotGroupStore();
   const cmdListener = new CommandListener(controller, repository, adapter, botManager, groups);
 
