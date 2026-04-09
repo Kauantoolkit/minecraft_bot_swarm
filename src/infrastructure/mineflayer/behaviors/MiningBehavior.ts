@@ -120,29 +120,61 @@ export class MiningBehavior {
    */
   private async safeDig(
     mfBot: MineflayerBot,
+    username: string,
     pos: Vec3,
     expectedName: string,
     mcData: ReturnType<typeof require>,
   ): Promise<boolean> {
+    console.log(
+      `[Mining] ${username}: indo até bloco "${expectedName}" em (${pos.x}, ${pos.y}, ${pos.z})`,
+    );
+
+    let goalReached = false;
     await new Promise<void>((res) => {
-      const onReach = () => { clearTimeout(timer); res(); };
-      const timer = setTimeout(() => { mfBot.off('goal_reached', onReach); res(); }, 8000);
+      const onReach = () => {
+        goalReached = true;
+        clearTimeout(timer);
+        res();
+      };
+      const timer = setTimeout(() => {
+        mfBot.off('goal_reached', onReach);
+        res();
+      }, 8000);
       mfBot.pathfinder.setGoal(new goals.GoalGetToBlock(pos.x, pos.y, pos.z));
       mfBot.once('goal_reached', onReach);
     });
 
     const block = mfBot.blockAt(pos);
-    if (!block || block.name !== expectedName) return false;
-    if (block.position.distanceTo(mfBot.entity.position) > 5) return false;
+    if (!block || block.name !== expectedName) {
+      console.warn(
+        `[Mining] ${username}: alvo mudou/sumiu antes de quebrar em (${pos.x}, ${pos.y}, ${pos.z})`,
+      );
+      return false;
+    }
+    if (block.position.distanceTo(mfBot.entity.position) > 5) {
+      const reason = goalReached ? 'distância de quebra ainda alta' : 'não achou caminho a tempo';
+      console.warn(
+        `[Mining] ${username}: parou em "${expectedName}" (${pos.x}, ${pos.y}, ${pos.z}) — ${reason}`,
+      );
+      return false;
+    }
 
     await this.autoEquipToolFor(mfBot, block, mcData);
 
-    if (!mfBot.canDigBlock(block)) return false;
+    if (!mfBot.canDigBlock(block)) {
+      console.warn(
+        `[Mining] ${username}: não consegue quebrar "${expectedName}" em (${pos.x}, ${pos.y}, ${pos.z})`,
+      );
+      return false;
+    }
 
     mfBot.pathfinder.stop();
     mfBot.clearControlStates();
 
     try {
+      console.log(
+        `[Mining] ${username}: tentando quebrar "${expectedName}" em (${pos.x}, ${pos.y}, ${pos.z})`,
+      );
       await mfBot.dig(block, true);
       // Brief pause so the dropped item spawns and the bot can pick it up
       await new Promise(r => setTimeout(r, 400));
@@ -154,10 +186,18 @@ export class MiningBehavior {
       mfBot.pathfinder.stop();
       mfBot.clearControlStates();
       try {
+        console.log(
+          `[Mining] ${username}: retry quebrar "${expectedName}" em (${pos.x}, ${pos.y}, ${pos.z})`,
+        );
         await mfBot.dig(retry, true);
         await new Promise(r => setTimeout(r, 400));
         return true;
-      } catch { return false; }
+      } catch {
+        console.warn(
+          `[Mining] ${username}: falha ao quebrar "${expectedName}" em (${pos.x}, ${pos.y}, ${pos.z})`,
+        );
+        return false;
+      }
     }
   }
 
@@ -200,7 +240,7 @@ export class MiningBehavior {
         console.warn(`[Mining] ${domainBot.username}: no "${blockName}" in range (pos=${posStr}, anyLog=${rawBlock?.name ?? 'none'}@${rawBlock ? `${Math.floor(rawBlock.position.x)},${Math.floor(rawBlock.position.y)},${Math.floor(rawBlock.position.z)}` : '?'})`);
         break;
       }
-      const mined = await this.safeDig(mfBot, block.position, blockName, mcData);
+      const mined = await this.safeDig(mfBot, domainBot.username, block.position, blockName, mcData);
       if (mined) {
         collected++;
         console.log(`[Mining] ${domainBot.username}: ${blockName} ${collected}/${count}`);
@@ -244,7 +284,7 @@ export class MiningBehavior {
     const veinQueue: Vec3[] = [];
 
     const tryDigAt = async (pos: Vec3): Promise<boolean> => {
-      const mined = await this.safeDig(mfBot, pos, blockName, mcData);
+      const mined = await this.safeDig(mfBot, domainBot.username, pos, blockName, mcData);
       if (!mined) return false;
 
       collected++;
@@ -319,7 +359,7 @@ export class MiningBehavior {
       const block = mfBot.blockAt(pos);
       if (!block || block.name === 'air' || block.name === 'cave_air') continue;
 
-      const mined = await this.safeDig(mfBot, pos, block.name, mcData);
+      const mined = await this.safeDig(mfBot, domainBot.username, pos, block.name, mcData);
       if (mined) {
         queue.markDone();
         console.log(`[Quarry] ${domainBot.username}: mined [${queue.progress}]`);
