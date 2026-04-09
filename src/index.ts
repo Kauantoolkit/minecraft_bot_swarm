@@ -40,11 +40,14 @@ async function main(): Promise<void> {
   const networkProvider = new NetworkProvider();
   const proxyLoader    = new ProxyLoader();
   const storage        = new StorageCache();
+  console.log('[Main] Core infrastructure initialized (repository, network, proxy loader, storage cache).');
 
   // This adapter spawns Worker threads — each bot is truly independent
   const adapter = new WorkerCommandAdapter();
+  console.log('[Main] Worker command adapter ready (one worker thread per bot).');
 
   proxyLoader.load(config.connection.proxyFile);
+  console.log(`[Main] Proxy configuration loaded from: ${config.connection.proxyFile}`);
 
   // ── Application ───────────────────────────────────────────────────────────
 
@@ -52,12 +55,15 @@ async function main(): Promise<void> {
   const controller  = new SwarmController(repository, adapter, storage);
   const groups      = new BotGroupStore();
   const cmdListener = new CommandListener(controller, repository, adapter, botManager, groups);
+  console.log('[Main] Application services wired (bot manager, controller, groups, command listener).');
 
   // ── Orchestrator (autonomous colony brain) ────────────────────────────────
 
   const orchestrator = new Orchestrator(adapter, repository, storage);
+  console.log('[Main] Orchestrator initialized with shared storage cache.');
 
   const webServer   = new WebServer(repository, controller, adapter, cmd => cmdListener.dispatch(cmd), config.web.port, orchestrator);
+  console.log(`[Main] Web debug UI configured on port ${config.web.port}.`);
 
   // When a bot autonomously builds and places chests, register them and
   // set the storage position so the Orchestrator can start assigning deposits.
@@ -82,22 +88,28 @@ async function main(): Promise<void> {
   // ── Startup sequence ──────────────────────────────────────────────────────
 
   webServer.start();
+  console.log('[Main] Web server start requested.');
 
   // Spawn all bots (each gets its own Worker thread)
   await botManager.spawnSwarm(config.swarm.botCount);
+  console.log('[Main] Swarm spawn completed.');
 
   // After all bots have spawned, push the swarm username list to every worker
   const usernames = repository.findAll().map(b => b.username);
   adapter.broadcastSwarmUsernames(usernames);
+  console.log(`[Main] Broadcasted swarm usernames to workers: ${usernames.join(', ')}`);
 
   // Attach in-game chat listeners (works via worker CHAT_MSG events)
   cmdListener.attachChatListeners();
+  console.log('[Main] Chat listeners attached.');
 
   // Start autonomous orchestration
   orchestrator.start();
+  console.log('[Main] Orchestrator loop started.');
 
   // Start console REPL
   cmdListener.startConsole();
+  console.log('[Main] Console command listener started.');
 
   console.log(`[Main] All ${config.swarm.botCount} bot(s) running in dedicated threads.`);
 }
