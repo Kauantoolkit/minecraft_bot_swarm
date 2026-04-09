@@ -16,7 +16,14 @@ later this will be useful as the coordinator or task controller will have every 
 they seem to have an problem with broken numbers at chest cood, saying it is air on the coord i passed, but it isnt
 
 
+at some points an bot started an drown suicide loop walkin always to an speficif spot in the water, it was the "builder bot" idk what was he trying to do, i need better logs to determine
+
 when collecting wood or anything in general the bots dont use dirt or stone blocks to climb and reach higher heightstm this is bad, they get stuck
+
+uma vez que adicionei scaffolding, eles confiam demais nisso e pararam de utilizar corretamente o pathing, criando caminhos de terra sem necessidade
+
+
+o hauler fica infinitamente colocando item no bau principal
 
 the bosts also go too hard in hunting mobs, sometimes even drowning, 
 
