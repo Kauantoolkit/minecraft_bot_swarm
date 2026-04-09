@@ -5,7 +5,7 @@ const vec3_1 = require("vec3");
 const WOOD_TYPES = [
     'oak_log', 'birch_log', 'spruce_log', 'jungle_log',
     'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log',
-    'pale_oak_log', 'crimson_stem', 'warped_stem',
+    'crimson_stem', 'warped_stem',
 ];
 function isWoodSource(name) {
     return name.endsWith('_log') || name.endsWith('_stem');
