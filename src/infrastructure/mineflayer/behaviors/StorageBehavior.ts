@@ -2,7 +2,7 @@ import { Bot as MineflayerBot } from 'mineflayer';
 import { goals } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import { Bot } from '../../../domain/entities/Bot';
-import { createMovements } from '../physics/PhysicsPatch';
+import { createDryMovements, createMovements } from '../physics/PhysicsPatch';
 
 /** Minimum empty inventory slots before the bot considers itself "full". */
 export const INVENTORY_FULL_THRESHOLD = 5;
@@ -20,6 +20,10 @@ const CHEST_BLOCK_NAMES = ['chest', 'trapped_chest', 'barrel', 'shulker_box',
   'brown_shulker_box', 'green_shulker_box', 'red_shulker_box', 'black_shulker_box',
 ];
 
+function normalizeBlockPos(pos: Vec3): Vec3 {
+  return new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
+}
+
 export class StorageBehavior {
   /**
    * Navigate to (x, y, z) and scan the surrounding area for chest/barrel blocks.
@@ -34,7 +38,7 @@ export class StorageBehavior {
     if (!mfBot) return [];
 
     // Navigate to the scan centre
-    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    mfBot.pathfinder.setMovements(createDryMovements(mfBot));
     await new Promise<void>(res => {
       mfBot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 3));
       mfBot.once('goal_reached', res);
@@ -68,31 +72,32 @@ export class StorageBehavior {
   async depositAll(domainBot: Bot, chestPos: Vec3): Promise<void> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
+    const targetPos = normalizeBlockPos(chestPos);
 
-    const chestBlock = mfBot.blockAt(chestPos);
+    const chestBlock = mfBot.blockAt(targetPos);
     if (!chestBlock) {
-      console.warn(`[Storage] ${domainBot.username}: no block at chest pos (${chestPos.x},${chestPos.y},${chestPos.z})`);
+      console.warn(`[Storage] ${domainBot.username}: no block at chest pos (${targetPos.x},${targetPos.y},${targetPos.z})`);
       return;
     }
 
     // Navigate adjacent to the chest
-    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    mfBot.pathfinder.setMovements(createDryMovements(mfBot));
     await new Promise<void>((res) => {
-      mfBot.pathfinder.setGoal(new goals.GoalNear(chestPos.x, chestPos.y, chestPos.z, 3));
+      mfBot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 3));
       mfBot.once('goal_reached', res);
       setTimeout(res, 15000);
     });
 
     // Re-fetch block after moving (chunk may have loaded)
-    const block = mfBot.blockAt(chestPos);
+    const block = mfBot.blockAt(targetPos);
     if (!block) {
-      throw new Error(`chest block not loaded after navigation at (${chestPos.x},${chestPos.y},${chestPos.z})`);
+      throw new Error(`chest block not loaded after navigation at (${targetPos.x},${targetPos.y},${targetPos.z})`);
     }
 
     // Verify the block is actually a container before trying to open it.
     // openChest throws "containerToOpen is neither a block nor an entity" for non-containers.
     if (!CHEST_BLOCK_NAMES.includes(block.name)) {
-      throw new Error(`block at (${chestPos.x},${chestPos.y},${chestPos.z}) is "${block.name}", not a chest`);
+      throw new Error(`block at (${targetPos.x},${targetPos.y},${targetPos.z}) is "${block.name}", not a chest`);
     }
 
     type ChestWindow = { items(): Array<{ type: number; count: number; metadata: number; nbt?: { value?: { Damage?: { value?: number } } } }>; deposit(type: number, meta: number | null, count: number): Promise<void>; close(): void };
@@ -115,7 +120,7 @@ export class StorageBehavior {
         }
       }
 
-      console.log(`[Storage] ${domainBot.username}: deposited inventory → (${chestPos.x},${chestPos.y},${chestPos.z})`);
+      console.log(`[Storage] ${domainBot.username}: deposited inventory → (${targetPos.x},${targetPos.y},${targetPos.z})`);
     } finally {
       chest?.close();
     }
@@ -128,6 +133,7 @@ export class StorageBehavior {
   async withdraw(domainBot: Bot, chestPos: Vec3, itemName: string, count: number): Promise<number> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return 0;
+    const targetPos = normalizeBlockPos(chestPos);
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mcData = require('minecraft-data')(mfBot.version);
@@ -137,17 +143,17 @@ export class StorageBehavior {
       return 0;
     }
 
-    const block = mfBot.blockAt(chestPos);
+    const block = mfBot.blockAt(targetPos);
     if (!block) return 0;
 
-    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    mfBot.pathfinder.setMovements(createDryMovements(mfBot));
     await new Promise<void>((res) => {
-      mfBot.pathfinder.setGoal(new goals.GoalNear(chestPos.x, chestPos.y, chestPos.z, 3));
+      mfBot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 3));
       mfBot.once('goal_reached', res);
       setTimeout(res, 15000);
     });
 
-    const freshBlock = mfBot.blockAt(chestPos);
+    const freshBlock = mfBot.blockAt(targetPos);
     if (!freshBlock) return 0;
 
     type Chest = { items(): Array<{ type: number; count: number; metadata: number }>; withdraw(type: number, meta: number | null, count: number): Promise<void>; close(): void };

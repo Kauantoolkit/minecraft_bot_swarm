@@ -6,7 +6,12 @@ import { Vec3 } from 'vec3';
 const WOOD_TYPES = [
   'oak_log', 'birch_log', 'spruce_log', 'jungle_log',
   'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log',
+  'pale_oak_log', 'crimson_stem', 'warped_stem',
 ];
+
+function isWoodSource(name: string): boolean {
+  return name.endsWith('_log') || name.endsWith('_stem');
+}
 
 /**
  * Per-worker task executor.
@@ -95,10 +100,18 @@ export class TaskRunner {
         for (const wood of WOOD_TYPES) {
           this.checkCancelled();
           try {
-            await this.adapter.collect(this.bot, wood, count, onFull, true); // scaffold=true
+            // Prefer normal pathing first. Scaffolding is only a fallback so
+            // bots do not overbuild dirt bridges/columns unnecessarily.
+            await this.adapter.collect(this.bot, wood, count, onFull, false);
             return; // success
           } catch {
-            // try next wood type
+            // try with scaffold fallback for high or awkward trees
+            try {
+              await this.adapter.collect(this.bot, wood, count, onFull, true);
+              return; // success
+            } catch {
+              // try next wood type
+            }
           }
         }
         throw new Error('No wood found nearby');
@@ -204,7 +217,7 @@ export class TaskRunner {
     if (!mfBot) return;
 
     const currentLogs = mfBot.inventory.items()
-      .filter(i => i.name.endsWith('_log'))
+      .filter(i => isWoodSource(i.name))
       .reduce((s, i) => s + i.count, 0);
 
     if (currentLogs >= needed) return;
@@ -216,10 +229,15 @@ export class TaskRunner {
     for (const wood of WOOD_TYPES) {
       this.checkCancelled();
       try {
-        await this.adapter.collect(this.bot, wood, toCollect);
+        await this.adapter.collect(this.bot, wood, toCollect, undefined, false);
         return;
       } catch {
-        // try next type
+        try {
+          await this.adapter.collect(this.bot, wood, toCollect, undefined, true);
+          return;
+        } catch {
+          // try next type
+        }
       }
     }
     throw new Error('Could not find any wood logs nearby');
@@ -236,10 +254,12 @@ export class TaskRunner {
     if (currentPlanks >= needed) return;
 
     // Each log → 4 planks; craft in batches by log type
-    const logs = mfBot.inventory.items().filter(i => i.name.endsWith('_log'));
+    const logs = mfBot.inventory.items().filter(i => isWoodSource(i.name));
     for (const logStack of logs) {
       this.checkCancelled();
-      const plankName = logStack.name.replace('_log', '_planks');
+      const plankName = logStack.name
+        .replace('_log', '_planks')
+        .replace('_stem', '_planks');
       const batchLogs = Math.ceil((needed - currentPlanks) / 4);
       try {
         await this.adapter.craftItem(this.bot, plankName, batchLogs);
