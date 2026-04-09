@@ -95,7 +95,7 @@ export class TaskRunner {
         for (const wood of WOOD_TYPES) {
           this.checkCancelled();
           try {
-            await this.adapter.collect(this.bot, wood, count, onFull);
+            await this.adapter.collect(this.bot, wood, count, onFull, true); // scaffold=true
             return; // success
           } catch {
             // try next wood type

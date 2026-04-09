@@ -86,8 +86,13 @@ export class StorageBehavior {
     // Re-fetch block after moving (chunk may have loaded)
     const block = mfBot.blockAt(chestPos);
     if (!block) {
-      console.warn(`[Storage] ${domainBot.username}: chest block not loaded after navigation`);
-      return;
+      throw new Error(`chest block not loaded after navigation at (${chestPos.x},${chestPos.y},${chestPos.z})`);
+    }
+
+    // Verify the block is actually a container before trying to open it.
+    // openChest throws "containerToOpen is neither a block nor an entity" for non-containers.
+    if (!CHEST_BLOCK_NAMES.includes(block.name)) {
+      throw new Error(`block at (${chestPos.x},${chestPos.y},${chestPos.z}) is "${block.name}", not a chest`);
     }
 
     type ChestWindow = { items(): Array<{ type: number; count: number; metadata: number; nbt?: { value?: { Damage?: { value?: number } } } }>; deposit(type: number, meta: number | null, count: number): Promise<void>; close(): void };
@@ -111,8 +116,6 @@ export class StorageBehavior {
       }
 
       console.log(`[Storage] ${domainBot.username}: deposited inventory → (${chestPos.x},${chestPos.y},${chestPos.z})`);
-    } catch (err) {
-      console.warn(`[Storage] ${domainBot.username}: depositAll failed — ${err}`);
     } finally {
       chest?.close();
     }

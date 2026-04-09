@@ -52,11 +52,12 @@ async function main(): Promise<void> {
   const controller  = new SwarmController(repository, adapter);
   const groups      = new BotGroupStore();
   const cmdListener = new CommandListener(controller, repository, adapter, botManager, groups);
-  const webServer   = new WebServer(repository, controller, adapter, cmd => cmdListener.dispatch(cmd), config.web.port);
 
   // ── Orchestrator (autonomous colony brain) ────────────────────────────────
 
   const orchestrator = new Orchestrator(adapter, repository, storage);
+
+  const webServer   = new WebServer(repository, controller, adapter, cmd => cmdListener.dispatch(cmd), config.web.port, orchestrator);
 
   // When a bot autonomously builds and places chests, register them and
   // set the storage position so the Orchestrator can start assigning deposits.

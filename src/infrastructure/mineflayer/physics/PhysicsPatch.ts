@@ -46,9 +46,15 @@ const FATAL_BLOCK_NAMES = [
 // Additional blocks treated as impassable in "dry" mode (mining navigation).
 const WATER_BLOCK_NAMES = ['water', 'flowing_water'];
 
-type McData = { blocksByName: Record<string, { id: number } | undefined> };
+// Blocks the bot can place as scaffolding to climb up (checked against inventory).
+const SCAFFOLDING_BLOCK_NAMES = [
+  'dirt', 'cobblestone', 'stone', 'gravel', 'sand',
+  'netherrack', 'cobbled_deepslate', 'andesite', 'diorite', 'granite',
+];
 
-function buildMovements(mfBot: MineflayerBot, avoidWater: boolean): Movements {
+type McData = { blocksByName: Record<string, { id: number } | undefined>; itemsByName: Record<string, { id: number } | undefined> };
+
+function buildMovements(mfBot: MineflayerBot, avoidWater: boolean, scaffold = false): Movements {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mcData = require('minecraft-data')(mfBot.version) as McData;
   const movements = new Movements(mfBot);
@@ -69,6 +75,22 @@ function buildMovements(mfBot: MineflayerBot, avoidWater: boolean): Movements {
     (movements as unknown as Record<string, unknown>)['liquidCost'] = 10;
   }
 
+  if (scaffold) {
+    // Allow the pathfinder to place blocks to climb up (like Baritone).
+    (movements as unknown as Record<string, unknown>)['canDig'] = true;
+    (movements as unknown as Record<string, unknown>)['allow1by1towers'] = true;
+    const scaffoldIds: number[] = [];
+    const inventoryItems = mfBot.inventory.items() as Array<{ type: number }>;
+    for (const name of SCAFFOLDING_BLOCK_NAMES) {
+      const itemDef = mcData.itemsByName[name];
+      if (!itemDef) continue;
+      if (inventoryItems.some(i => i.type === itemDef.id)) {
+        scaffoldIds.push(itemDef.id);
+      }
+    }
+    (movements as unknown as Record<string, unknown>)['scaffoldingBlocks'] = scaffoldIds;
+  }
+
   return movements;
 }
 
@@ -78,6 +100,15 @@ function buildMovements(mfBot: MineflayerBot, avoidWater: boolean): Movements {
  */
 export function createMovements(mfBot: MineflayerBot): Movements {
   return buildMovements(mfBot, false);
+}
+
+/**
+ * Scaffolding movements: same as general but the pathfinder will place dirt/
+ * cobblestone/etc. from inventory to climb up to blocks that are otherwise
+ * out of reach (like upper tree logs).
+ */
+export function createScaffoldMovements(mfBot: MineflayerBot): Movements {
+  return buildMovements(mfBot, false, true);
 }
 
 /**
@@ -122,17 +153,40 @@ export function installPhysicsPatches(domainBot: Bot): void {
     return clientWrite(channel, packet);
   };
 
-  // Patch 3: Watchdog — corrects NaN velocity and stuck physicsEnabled every 50 ms.
+  // Patch 3: Watchdog — corrects NaN velocity/position and stuck physicsEnabled every 50 ms.
+  let lastGoodPos: Vec3 | null = null;
   const watchdog = setInterval(() => {
     if (!mfBot.entity?.velocity) return;
+
     if (!mfBot.physicsEnabled) {
       console.warn(`[${ts()}] PhysicsPatch: Forced physicsEnabled=true → ${mfBot.username}`);
       mfBot.physicsEnabled = true;
     }
+
+    // Position NaN guard — must run before velocity clamp so we have a safe base.
+    const pos = mfBot.entity.position;
+    if (isNaN(pos.x) || isNaN(pos.y) || isNaN(pos.z)) {
+      if (lastGoodPos) {
+        pos.x = lastGoodPos.x;
+        pos.y = lastGoodPos.y;
+        pos.z = lastGoodPos.z;
+        mfBot.entity.velocity = new Vec3(0, -0.08, 0);
+        mfBot.clearControlStates();
+        console.warn(`[${ts()}] PhysicsPatch: Restored NaN position → ${mfBot.username} (${Math.floor(lastGoodPos.x)},${Math.floor(lastGoodPos.y)},${Math.floor(lastGoodPos.z)})`);
+      }
+    } else {
+      lastGoodPos = pos.clone();
+    }
+
     if (vecIsNaN(mfBot.entity.velocity)) {
       mfBot.entity.velocity = clampVelocity(mfBot.entity.velocity);
       mfBot.clearControlStates();
       console.log(`[${ts()}] PhysicsPatch: Clamped NaN velocity → ${mfBot.username}`);
+
+      const below = mfBot.blockAt(mfBot.entity.position.offset(0, -0.5, 0));
+      if (!below || below.boundingBox === 'empty') {
+        mfBot.entity.velocity = new Vec3(0, -0.08, 0);
+      }
     }
   }, 50);
   mfBot.once('end', () => clearInterval(watchdog));

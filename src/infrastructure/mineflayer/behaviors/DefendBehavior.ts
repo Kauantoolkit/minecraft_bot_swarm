@@ -44,6 +44,11 @@ export class DefendBehavior {
     let lastHurtTime = 0;
     const HURT_COOLDOWN_MS = 1000;
 
+    // Maximum distance the bot will chase a mob from where combat started.
+    const MAX_CHASE_DIST = 24;
+    // Position recorded when the first mob is engaged in this combat episode.
+    let combatOrigin: Vec3 | null = null;
+
     // React to damage — scan immediately with 2× radius to catch mobs that
     // back away after attacking before the regular 10-tick scan fires.
     const onHurt = (entity: Entity) => {
@@ -163,9 +168,27 @@ export class DefendBehavior {
         ? allMobs.find(e => e.id === lastThreatId)!
         : (groundMob ?? allMobs[0]);
 
+      // Disengage if the bot has chased the mob too far from where combat started
+      if (defendState === 'attacking' && combatOrigin) {
+        const drift = mfBot.entity.position.distanceTo(combatOrigin);
+        if (drift > MAX_CHASE_DIST) {
+          console.warn(`[${ts()}][Defend] ${domainBot.username}: drifted ${Math.floor(drift)}m from origin — disengaging`);
+          lastThreatId = null;
+          combatOrigin = null;
+          defendState = 'idle';
+          mfBot.physicsEnabled = true;
+          mfBot.pathfinder.stop();
+          mfBot.clearControlStates();
+          meta.resumeCallback?.();
+          return;
+        }
+      }
+
       if (primaryMob) {
         if (defendState !== 'attacking' || lastThreatId !== primaryMob.id) {
           const prev = defendState;
+          // Record origin only on the first transition into combat
+          if (prev !== 'attacking') combatOrigin = mfBot.entity.position.clone();
           defendState = 'attacking';
           lastThreatId = primaryMob.id;
           const isAerial = AERIAL_MOBS.has((primaryMob.name ?? '').toLowerCase());
@@ -183,8 +206,8 @@ export class DefendBehavior {
         }
       } else if (defendState === 'attacking') {
         const deadStillInEntities = lastThreatId !== null && !!mfBot.entities[lastThreatId];
+        combatOrigin = null;
         defendState = 'idle';
-        lastThreatId = null;
         mfBot.physicsEnabled = true;
         mfBot.pathfinder.stop();
         mfBot.clearControlStates();

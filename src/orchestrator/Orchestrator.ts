@@ -64,6 +64,16 @@ export class Orchestrator {
       const rec = this.state.bots.get(botId);
       if (rec) { rec.taskStatus = 'idle'; rec.failCount++; }
     });
+
+    // When a bot disconnects, mark it idle and pause autonomous assignment
+    // until it comes back online. This stops the Orchestrator from queueing
+    // tasks into a dead Worker thread.
+    adapter.on('disconnected', (botId: string, reason: string) => {
+      console.warn(`[Orchestrator] ${botId} disconnected (${reason}) — suspending assignment`);
+      const rec = this.state.bots.get(botId);
+      if (rec) { rec.taskStatus = 'idle'; rec.failCount = 0; }
+      this.pauseBot(botId, 60_000); // hold off for up to 60 s while reconnecting
+    });
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -85,6 +95,11 @@ export class Orchestrator {
     this.state.storagePos = { x, y, z };
   }
 
+  clearStoragePos(): void {
+    this.state.storagePos = null;
+    console.log('[Orchestrator] storagePos cleared');
+  }
+
   setPhase(phase: ColonyPhase): void {
     this.state.phase = phase;
     console.log(`[Orchestrator] Colony phase → ${phase}`);
@@ -100,6 +115,20 @@ export class Orchestrator {
     if (existing) clearTimeout(existing);
     const t = setTimeout(() => this.paused.delete(botId), quietMs);
     this.paused.set(botId, t);
+  }
+
+  resumeBot(botId: string): void {
+    const existing = this.paused.get(botId);
+    if (existing) clearTimeout(existing);
+    this.paused.delete(botId);
+  }
+
+  isPaused(botId: string): boolean {
+    return this.paused.has(botId);
+  }
+
+  pausedBotIds(): string[] {
+    return Array.from(this.paused.keys());
   }
 
   addThreat(username: string): void { this.state.threats.add(username); }

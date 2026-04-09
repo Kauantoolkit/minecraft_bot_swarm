@@ -115,7 +115,10 @@ export class MineflayerAdapter implements IBotAdapter {
         
         // 🔧 Physics freeze fix for 1.21 velocity NaN bug
         installPhysicsPatches(domainBot);
-        
+
+        // Auto-defend: always active from first spawn so bots aren't defenceless.
+        this.defendBehavior.start(domainBot, 16);
+
         domainBot.setState(BotState.CONNECTED);
         if (!resolved) {
           resolved = true;
@@ -254,8 +257,8 @@ export class MineflayerAdapter implements IBotAdapter {
 
   // ─── Resource collection ──────────────────────────────────────────────────
 
-  collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void> {
-    return this.miningBehavior.collect(domainBot, blockName, count, onFull);
+  collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn, scaffold = false): Promise<void> {
+    return this.miningBehavior.collect(domainBot, blockName, count, onFull, scaffold);
   }
 
   collectVein(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void> {
