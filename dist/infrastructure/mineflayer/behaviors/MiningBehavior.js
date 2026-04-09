@@ -181,6 +181,7 @@ class MiningBehavior {
         domainBot.setState(BotState_1.BotState.MOVING);
         mfBot.pathfinder.setMovements(movementsFn(mfBot));
         let collected = 0;
+        const failedPositions = new Set();
         while (collected < count) {
             if (onFull && (0, StorageBehavior_1.isInventoryFull)(mfBot)) {
                 console.log(`[Mining] ${domainBot.username}: inventory full — depositing`);
@@ -189,6 +190,7 @@ class MiningBehavior {
             }
             const block = mfBot.findBlock({
                 matching: b => b.type === blockType.id
+                    && !failedPositions.has(`${b.position.x},${b.position.y},${b.position.z}`)
                     && !isBlockUnderwater(mfBot, b.position),
                 maxDistance: 128,
             });
@@ -205,6 +207,9 @@ class MiningBehavior {
                 console.log(`[Mining] ${domainBot.username}: ${blockName} ${collected}/${count}`);
                 await escapeWaterIfNeeded(mfBot, domainBot.username);
                 mfBot.pathfinder.setMovements(movementsFn(mfBot));
+            }
+            else {
+                failedPositions.add(`${block.position.x},${block.position.y},${block.position.z}`);
             }
         }
         await escapeWaterIfNeeded(mfBot, domainBot.username);
