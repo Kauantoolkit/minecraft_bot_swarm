@@ -15,6 +15,7 @@ const worker_threads_1 = require("worker_threads");
 const socks_proxy_agent_1 = require("socks-proxy-agent");
 const Bot_1 = require("../domain/entities/Bot");
 const MineflayerAdapter_1 = require("../infrastructure/mineflayer/MineflayerAdapter");
+const StorageBehavior_1 = require("../infrastructure/mineflayer/behaviors/StorageBehavior");
 const TaskRunner_1 = require("../tasks/TaskRunner");
 const vec3_1 = require("vec3");
 if (worker_threads_1.isMainThread) {
@@ -37,7 +38,12 @@ console.error = (...args) => send({ type: 'LOG', level: 'error', message: args.j
 // ── Bot state ─────────────────────────────────────────────────────────────────
 const domainBot = new Bot_1.Bot({ id: data.botId, username: data.username, proxy: data.proxyUrl ? { url: data.proxyUrl } : undefined });
 const adapter = new MineflayerAdapter_1.MineflayerAdapter();
-const tasks = new TaskRunner_1.TaskRunner(adapter, domainBot);
+const storageBehavior = new StorageBehavior_1.StorageBehavior();
+// When a build_storage task finishes placing chests, report positions to main
+// thread so it can register them in StorageCache.
+const tasks = new TaskRunner_1.TaskRunner(adapter, domainBot, (label, positions) => {
+    send({ type: 'CHESTS_PLACED', label, positions });
+});
 // ── Snapshot helper ───────────────────────────────────────────────────────────
 function snapshot() {
     const mfBot = domainBot.handle;
@@ -222,6 +228,11 @@ port.on('message', async (msg) => {
             break;
         case 'PLAYER_SPOTTED':
             // No-op for now — workers react to their own perception
+            break;
+        case 'CMD_SCAN_STORAGE':
+            storageBehavior.scanNearbyChests(domainBot, msg.x, msg.y, msg.z, msg.radius)
+                .then(positions => send({ type: 'CMD_RESULT', reqId: msg.reqId, success: true, value: positions }))
+                .catch(e => send({ type: 'CMD_RESULT', reqId: msg.reqId, success: false, error: e.message }));
             break;
     }
 });

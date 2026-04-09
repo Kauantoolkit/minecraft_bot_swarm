@@ -14,6 +14,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.clampVelocity = clampVelocity;
 exports.vecIsNaN = vecIsNaN;
 exports.createMovements = createMovements;
+exports.createScaffoldMovements = createScaffoldMovements;
 exports.createDryMovements = createDryMovements;
 exports.installPhysicsPatches = installPhysicsPatches;
 const mineflayer_pathfinder_1 = require("mineflayer-pathfinder");
@@ -39,7 +40,12 @@ const FATAL_BLOCK_NAMES = [
 ];
 // Additional blocks treated as impassable in "dry" mode (mining navigation).
 const WATER_BLOCK_NAMES = ['water', 'flowing_water'];
-function buildMovements(mfBot, avoidWater) {
+// Blocks the bot can place as scaffolding to climb up (checked against inventory).
+const SCAFFOLDING_BLOCK_NAMES = [
+    'dirt', 'cobblestone', 'stone', 'gravel', 'sand',
+    'netherrack', 'cobbled_deepslate', 'andesite', 'diorite', 'granite',
+];
+function buildMovements(mfBot, avoidWater, scaffold = false) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mcData = require('minecraft-data')(mfBot.version);
     const movements = new mineflayer_pathfinder_1.Movements(mfBot);
@@ -57,6 +63,22 @@ function buildMovements(mfBot, avoidWater) {
         // General travel: water is traversable but 10× more costly than land.
         movements['liquidCost'] = 10;
     }
+    if (scaffold) {
+        // Allow the pathfinder to place blocks to climb up (like Baritone).
+        movements['canDig'] = true;
+        movements['allow1by1towers'] = true;
+        const scaffoldIds = [];
+        const inventoryItems = mfBot.inventory.items();
+        for (const name of SCAFFOLDING_BLOCK_NAMES) {
+            const itemDef = mcData.itemsByName[name];
+            if (!itemDef)
+                continue;
+            if (inventoryItems.some(i => i.type === itemDef.id)) {
+                scaffoldIds.push(itemDef.id);
+            }
+        }
+        movements['scaffoldingBlocks'] = scaffoldIds;
+    }
     return movements;
 }
 /**
@@ -65,6 +87,14 @@ function buildMovements(mfBot, avoidWater) {
  */
 function createMovements(mfBot) {
     return buildMovements(mfBot, false);
+}
+/**
+ * Scaffolding movements: same as general but the pathfinder will place dirt/
+ * cobblestone/etc. from inventory to climb up to blocks that are otherwise
+ * out of reach (like upper tree logs).
+ */
+function createScaffoldMovements(mfBot) {
+    return buildMovements(mfBot, false, true);
 }
 /**
  * Dry movements: water is completely impassable, same as lava.
@@ -103,7 +133,8 @@ function installPhysicsPatches(domainBot) {
         }
         return clientWrite(channel, packet);
     };
-    // Patch 3: Watchdog — corrects NaN velocity and stuck physicsEnabled every 50 ms.
+    // Patch 3: Watchdog — corrects NaN velocity/position and stuck physicsEnabled every 50 ms.
+    let lastGoodPos = null;
     const watchdog = setInterval(() => {
         if (!mfBot.entity?.velocity)
             return;
@@ -111,10 +142,29 @@ function installPhysicsPatches(domainBot) {
             console.warn(`[${(0, utils_1.ts)()}] PhysicsPatch: Forced physicsEnabled=true → ${mfBot.username}`);
             mfBot.physicsEnabled = true;
         }
+        // Position NaN guard — must run before velocity clamp so we have a safe base.
+        const pos = mfBot.entity.position;
+        if (isNaN(pos.x) || isNaN(pos.y) || isNaN(pos.z)) {
+            if (lastGoodPos) {
+                pos.x = lastGoodPos.x;
+                pos.y = lastGoodPos.y;
+                pos.z = lastGoodPos.z;
+                mfBot.entity.velocity = new vec3_1.Vec3(0, -0.08, 0);
+                mfBot.clearControlStates();
+                console.warn(`[${(0, utils_1.ts)()}] PhysicsPatch: Restored NaN position → ${mfBot.username} (${Math.floor(lastGoodPos.x)},${Math.floor(lastGoodPos.y)},${Math.floor(lastGoodPos.z)})`);
+            }
+        }
+        else {
+            lastGoodPos = pos.clone();
+        }
         if (vecIsNaN(mfBot.entity.velocity)) {
             mfBot.entity.velocity = clampVelocity(mfBot.entity.velocity);
             mfBot.clearControlStates();
             console.log(`[${(0, utils_1.ts)()}] PhysicsPatch: Clamped NaN velocity → ${mfBot.username}`);
+            const below = mfBot.blockAt(mfBot.entity.position.offset(0, -0.5, 0));
+            if (!below || below.boundingBox === 'empty') {
+                mfBot.entity.velocity = new vec3_1.Vec3(0, -0.08, 0);
+            }
         }
     }, 50);
     mfBot.once('end', () => clearInterval(watchdog));

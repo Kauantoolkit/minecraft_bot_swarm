@@ -21,6 +21,12 @@ export declare function vecIsNaN(vec: Vec3): boolean;
  */
 export declare function createMovements(mfBot: MineflayerBot): Movements;
 /**
+ * Scaffolding movements: same as general but the pathfinder will place dirt/
+ * cobblestone/etc. from inventory to climb up to blocks that are otherwise
+ * out of reach (like upper tree logs).
+ */
+export declare function createScaffoldMovements(mfBot: MineflayerBot): Movements;
+/**
  * Dry movements: water is completely impassable, same as lava.
  * Used by mining navigation — if no dry path exists the pathfinder returns
  * noPath and the mining loop skips to the next candidate block.

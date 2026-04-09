@@ -114,6 +114,9 @@ class WorkerCommandAdapter extends events_1.EventEmitter {
             case 'CHAT_MSG':
                 this.emit('chat_msg', domainBot.id, msg.username, msg.message);
                 break;
+            case 'CHESTS_PLACED':
+                this.emit('chests_placed', domainBot.id, msg.label, msg.positions);
+                break;
             case 'LOG': {
                 const prefix = `[${domainBot.username}]`;
                 if (msg.level === 'error')
@@ -252,6 +255,13 @@ class WorkerCommandAdapter extends events_1.EventEmitter {
     }
     cancelTask(botId) {
         this.send(botId, { type: 'CANCEL_TASK' });
+    }
+    /**
+     * Send one bot to a position, scan for nearby chest/barrel blocks, and return
+     * their coordinates. The caller (CommandListener) then registers them in StorageCache.
+     */
+    scanStorage(botId, x, y, z, radius) {
+        return this.sendAsync(botId, reqId => ({ type: 'CMD_SCAN_STORAGE', reqId, x, y, z, radius }));
     }
     /** Push the current swarm username list to all workers (for bodyguard/guard exclusion). */
     broadcastSwarmUsernames(usernames) {

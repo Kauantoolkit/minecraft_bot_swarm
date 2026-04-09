@@ -10,6 +10,7 @@ export interface BotRecord extends BotSnapshot {
 /** Shared colony state — lives in the main thread only. */
 export interface GlobalState {
     bots: Map<string, BotRecord>;
+    basePos: SerializedVec3 | null;
     storagePos: SerializedVec3 | null;
     resources: Map<string, number>;
     threats: Set<string>;

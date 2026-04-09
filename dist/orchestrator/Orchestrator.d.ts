@@ -34,6 +34,7 @@ export declare class Orchestrator {
     enableAutonomous(): void;
     disableAutonomous(): void;
     setStoragePos(x: number, y: number, z: number): void;
+    clearStoragePos(): void;
     setPhase(phase: ColonyPhase): void;
     /**
      * Temporarily suspend autonomous task assignment for a bot.
@@ -41,11 +42,23 @@ export declare class Orchestrator {
      * After `quietMs` the bot re-enters autonomous mode.
      */
     pauseBot(botId: string, quietMs?: number): void;
+    resumeBot(botId: string): void;
+    isPaused(botId: string): boolean;
+    pausedBotIds(): string[];
     addThreat(username: string): void;
     removeThreat(username: string): void;
     getState(): Readonly<GlobalState>;
     private tick;
     private nextId;
+    /**
+     * Resolve the best chest position for a bot.
+     * Prefers the nearest registered chest to the bot's current position.
+     * Falls back to the manually set storagePos if no chests are registered.
+     */
+    private resolveChest;
+    private ensureBasePos;
+    private toBlockPos;
+    private hasDepositableItems;
     private selectTask;
     private idle;
 }

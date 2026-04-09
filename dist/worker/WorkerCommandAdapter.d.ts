@@ -66,6 +66,15 @@ export declare class WorkerCommandAdapter extends EventEmitter implements IBotAd
     stopExplore(bot: Bot): void;
     assignTask(botId: string, descriptor: TaskDescriptor): void;
     cancelTask(botId: string): void;
+    /**
+     * Send one bot to a position, scan for nearby chest/barrel blocks, and return
+     * their coordinates. The caller (CommandListener) then registers them in StorageCache.
+     */
+    scanStorage(botId: string, x: number, y: number, z: number, radius: number): Promise<Array<{
+        x: number;
+        y: number;
+        z: number;
+    }>>;
     /** Push the current swarm username list to all workers (for bodyguard/guard exclusion). */
     broadcastSwarmUsernames(usernames: string[]): void;
 }

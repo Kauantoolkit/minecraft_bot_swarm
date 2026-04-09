@@ -305,8 +305,39 @@ class CommandListener {
                         this.controller.withdraw(label, itemName, parseInt(rawCount, 10) || 1, target);
                         break;
                     }
+                    case 'scan': {
+                        // store scan <label> <x> <y> <z> [radius=16]
+                        // Sends ONE online bot to navigate to (x,y,z), scan for nearby chests
+                        // within radius blocks, and auto-register all found positions as
+                        // "<label>_0", "<label>_1", etc. in the StorageCache.
+                        const [scanLabel, sx, sy, sz, sr] = storeArgs;
+                        const [sx2, sy2, sz2] = [Number(sx), Number(sy), Number(sz)];
+                        const radius = isNaN(Number(sr)) ? 16 : Number(sr);
+                        if (!scanLabel || isNaN(sx2) || isNaN(sy2) || isNaN(sz2)) {
+                            console.log('Usage: store scan <label> <x> <y> <z> [radius=16]');
+                            break;
+                        }
+                        if (!(this.adapter instanceof WorkerCommandAdapter_1.WorkerCommandAdapter)) {
+                            console.log('[Storage] store scan requires worker mode');
+                            break;
+                        }
+                        const scanBots = this.repository.findAll().filter(b => b.isOnline());
+                        if (scanBots.length === 0) {
+                            console.log('[Storage] No bots online');
+                            break;
+                        }
+                        const scanBot = scanBots[0];
+                        console.log(`[Storage] ${scanBot.username} scanning for chests near (${sx2},${sy2},${sz2}) r=${radius}...`);
+                        this.adapter.scanStorage(scanBot.id, sx2, sy2, sz2, radius)
+                            .then(positions => {
+                            const added = this.controller.storage.registerMany(scanLabel, positions);
+                            console.log(`[Storage] Scan complete — ${added} new chest(s) registered under "${scanLabel}"`);
+                        })
+                            .catch(err => console.warn(`[Storage] Scan failed: ${err.message}`));
+                        break;
+                    }
                     default:
-                        console.log('store register <label> <x> <y> <z> | store remove <label> | store list | store deposit [label] | store withdraw <label> <item> [count]');
+                        console.log('store register|remove|list|deposit|withdraw|scan');
                 }
                 break;
             }
@@ -524,11 +555,12 @@ const HELP_TEXT = `
   avoid <p1> [p2] [--radius N]  Flee from specific players
 
 ─── Storage ─────────────────────────────────────────────
-  store register <label> <x> <y> <z>  Register a chest
-  store remove <label>           Remove a chest
-  store list                     List registered chests
-  store deposit [label|nearest]  Deposit inventory to chest
-  store withdraw <label> <item> [count]  Withdraw from chest
+  store register <label> <x> <y> <z>           Register a single chest
+  store scan <label> <x> <y> <z> [radius=16]  Auto-scan area for chests (registers all found)
+  store remove <label>                         Remove a chest
+  store list                                   List registered chests
+  store deposit [label|nearest]                Deposit inventory to chest
+  store withdraw <label> <item> [count]        Withdraw from chest
 
 ─── Resources ───────────────────────────────────────────
   collect <block> [count] [--vein] [--store <label>]

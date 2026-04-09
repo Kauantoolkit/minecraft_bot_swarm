@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Orchestrator = void 0;
+const vec3_1 = require("vec3");
 const GlobalState_1 = require("./GlobalState");
 const RoleSystem_1 = require("./RoleSystem");
 const TICK_MS = 2000; // how often the Orchestrator wakes up
@@ -60,6 +61,18 @@ class Orchestrator {
                 rec.failCount++;
             }
         });
+        // When a bot disconnects, mark it idle and pause autonomous assignment
+        // until it comes back online. This stops the Orchestrator from queueing
+        // tasks into a dead Worker thread.
+        adapter.on('disconnected', (botId, reason) => {
+            console.warn(`[Orchestrator] ${botId} disconnected (${reason}) — suspending assignment`);
+            const rec = this.state.bots.get(botId);
+            if (rec) {
+                rec.taskStatus = 'idle';
+                rec.failCount = 0;
+            }
+            this.pauseBot(botId, 60000); // hold off for up to 60 s while reconnecting
+        });
     }
     // ── Public API ────────────────────────────────────────────────────────────
     start() {
@@ -77,7 +90,11 @@ class Orchestrator {
     enableAutonomous() { this.autonomousMode = true; }
     disableAutonomous() { this.autonomousMode = false; }
     setStoragePos(x, y, z) {
-        this.state.storagePos = { x, y, z };
+        this.state.storagePos = this.toBlockPos({ x, y, z });
+    }
+    clearStoragePos() {
+        this.state.storagePos = null;
+        console.log('[Orchestrator] storagePos cleared');
     }
     setPhase(phase) {
         this.state.phase = phase;
@@ -95,6 +112,18 @@ class Orchestrator {
         const t = setTimeout(() => this.paused.delete(botId), quietMs);
         this.paused.set(botId, t);
     }
+    resumeBot(botId) {
+        const existing = this.paused.get(botId);
+        if (existing)
+            clearTimeout(existing);
+        this.paused.delete(botId);
+    }
+    isPaused(botId) {
+        return this.paused.has(botId);
+    }
+    pausedBotIds() {
+        return Array.from(this.paused.keys());
+    }
     addThreat(username) { this.state.threats.add(username); }
     removeThreat(username) { this.state.threats.delete(username); }
     getState() { return this.state; }
@@ -105,6 +134,7 @@ class Orchestrator {
         const onlineBots = this.repository.findAll().filter(b => b.isOnline());
         if (onlineBots.length === 0)
             return;
+        this.ensureBasePos();
         // Re-assign roles whenever needed
         const roles = (0, RoleSystem_1.assignRoles)(onlineBots.length);
         onlineBots.forEach((bot, i) => {
@@ -140,34 +170,120 @@ class Orchestrator {
     nextId() {
         return `orch_${++this.taskCounter}_${Date.now()}`;
     }
+    /**
+     * Resolve the best chest position for a bot.
+     * Prefers the nearest registered chest to the bot's current position.
+     * Falls back to the manually set storagePos if no chests are registered.
+     */
+    resolveChest(rec) {
+        if (rec.position) {
+            const botVec = new vec3_1.Vec3(rec.position.x, rec.position.y, rec.position.z);
+            const nearest = this.storage.getNearest(botVec);
+            if (nearest)
+                return { x: nearest.pos.x, y: nearest.pos.y, z: nearest.pos.z };
+        }
+        return this.state.storagePos;
+    }
+    ensureBasePos() {
+        if (this.state.basePos)
+            return;
+        const firstWithPos = Array.from(this.state.bots.values()).find(r => !!r.position)?.position;
+        if (!firstWithPos)
+            return;
+        this.state.basePos = this.toBlockPos(firstWithPos);
+        console.log(`[Orchestrator] basePos set to (${this.state.basePos.x}, ${this.state.basePos.y}, ${this.state.basePos.z})`);
+    }
+    toBlockPos(pos) {
+        return {
+            x: Math.floor(pos.x),
+            y: Math.floor(pos.y),
+            z: Math.floor(pos.z),
+        };
+    }
+    hasDepositableItems(rec) {
+        const keepPattern = /(pickaxe|axe|shovel|hoe|sword|helmet|chestplate|leggings|boots|shield|bow|crossbow|fishing_rod|shears)$/;
+        return rec.inventory.some(i => i.count > 0 && !keepPattern.test(i.name));
+    }
     selectTask(rec) {
-        const { storagePos, phase } = this.state;
+        const { phase } = this.state;
+        const chestPos = this.resolveChest(rec);
+        const hasAnyStorage = this.storage.list().length > 0;
         switch (rec.role) {
             case 'miner': {
+                // Bootstrap safety: if no storage exists yet, any miner can bootstrap
+                // the first chest so 1-3 bot colonies are not blocked waiting for a builder.
+                if (!hasAnyStorage) {
+                    const base = this.state.basePos ?? this.toBlockPos(rec.position ?? { x: 0, y: 64, z: 0 });
+                    return {
+                        id: this.nextId(),
+                        type: 'build_storage',
+                        params: {
+                            storageLabel: 'base_0',
+                            centerX: base.x + 2,
+                            centerY: base.y,
+                            centerZ: base.z,
+                            chestCount: 1,
+                        },
+                    };
+                }
                 // Deposit first if carrying a lot
-                if ((0, RoleSystem_1.isInventoryFull)(rec) && storagePos) {
-                    return { id: this.nextId(), type: 'deposit', params: { chestPos: storagePos } };
+                if ((0, RoleSystem_1.isInventoryFull)(rec) && chestPos) {
+                    return { id: this.nextId(), type: 'deposit', params: { chestPos } };
                 }
                 if (phase === 'bootstrap') {
-                    return { id: this.nextId(), type: 'collect_wood', params: { count: 32, chestPos: storagePos ?? undefined } };
+                    return { id: this.nextId(), type: 'collect_wood', params: { count: 32, chestPos: chestPos ?? undefined } };
                 }
                 const blockName = (0, RoleSystem_1.mineTargetForPhase)(phase);
-                return { id: this.nextId(), type: 'mine', params: { blockName, count: 32, chestPos: storagePos ?? undefined } };
+                return { id: this.nextId(), type: 'mine', params: { blockName, count: 32, chestPos: chestPos ?? undefined } };
             }
             case 'hauler':
-                if (!storagePos)
-                    return this.idle(5000);
-                return { id: this.nextId(), type: 'deposit', params: { chestPos: storagePos } };
-            case 'farmer':
-                return { id: this.nextId(), type: 'farm', params: { centerX: 0, centerZ: 0, radius: 16 } };
-            case 'soldier':
-                return { id: this.nextId(), type: 'guard', params: { x: 0, y: 64, z: 0, radius: 32 } };
-            case 'builder':
-                // Builders need materials first — send them to collect wood or deposit
-                if ((0, RoleSystem_1.isInventoryFull)(rec) && storagePos) {
-                    return { id: this.nextId(), type: 'deposit', params: { chestPos: storagePos } };
+                if (chestPos && this.hasDepositableItems(rec)) {
+                    return { id: this.nextId(), type: 'deposit', params: { chestPos } };
                 }
-                return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: storagePos ?? undefined } };
+                return this.idle(8000);
+            case 'farmer':
+                return {
+                    id: this.nextId(),
+                    type: 'farm',
+                    params: {
+                        centerX: this.state.basePos?.x ?? rec.position?.x ?? 0,
+                        centerZ: this.state.basePos?.z ?? rec.position?.z ?? 0,
+                        radius: 16,
+                    },
+                };
+            case 'soldier':
+                return {
+                    id: this.nextId(),
+                    type: 'guard',
+                    params: {
+                        x: this.state.basePos?.x ?? rec.position?.x ?? 0,
+                        y: this.state.basePos?.y ?? rec.position?.y ?? 64,
+                        z: this.state.basePos?.z ?? rec.position?.z ?? 0,
+                        radius: 24,
+                    },
+                };
+            case 'builder': {
+                // If no storage exists at all, the builder's first job is to construct one
+                if (!hasAnyStorage) {
+                    const base = this.state.basePos ?? this.toBlockPos(rec.position ?? { x: 0, y: 64, z: 0 });
+                    return {
+                        id: this.nextId(),
+                        type: 'build_storage',
+                        params: {
+                            storageLabel: 'base',
+                            centerX: base.x + 3,
+                            centerY: base.y,
+                            centerZ: base.z,
+                            chestCount: 4,
+                        },
+                    };
+                }
+                // Otherwise gather materials or deposit
+                if ((0, RoleSystem_1.isInventoryFull)(rec) && chestPos) {
+                    return { id: this.nextId(), type: 'deposit', params: { chestPos } };
+                }
+                return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: chestPos ?? undefined } };
+            }
             default:
                 return this.idle(10000);
         }

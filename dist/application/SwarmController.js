@@ -4,20 +4,19 @@ exports.SwarmController = void 0;
 const SchematicLoader_1 = require("../infrastructure/schematic/SchematicLoader");
 const BuildQueue_1 = require("../infrastructure/schematic/BuildQueue");
 const QuarryQueue_1 = require("../infrastructure/mining/QuarryQueue");
-const StorageCache_1 = require("../infrastructure/storage/StorageCache");
 const SwarmIntel_1 = require("./SwarmIntel");
 const PlayerRelationship_1 = require("../domain/value-objects/PlayerRelationship");
 const BUILD_MAX_PASSES = 5;
 const BUILD_PASS_DELAY_MS = 3000;
 class SwarmController {
-    constructor(repository, adapter) {
+    constructor(repository, adapter, storage) {
         this.repository = repository;
         this.adapter = adapter;
+        this.storage = storage;
         this.buildQueue = new BuildQueue_1.BuildQueue();
         this.quarryQueue = new QuarryQueue_1.QuarryQueue();
         this.intel = new SwarmIntel_1.SwarmIntel();
         this.relations = new PlayerRelationship_1.PlayerRelationshipStore();
-        this.storage = new StorageCache_1.StorageCache();
     }
     /**
      * Resolve target to online bot list.

@@ -97,6 +97,23 @@ class StorageCache {
     list() {
         return this.entries.map(e => ({ label: e.label, pos: new vec3_1.Vec3(e.x, e.y, e.z) }));
     }
+    /** Register multiple chests at once (from an auto-scan). Skips duplicates. */
+    registerMany(prefix, positions) {
+        let added = 0;
+        for (const pos of positions) {
+            const isDupe = this.entries.some(e => e.x === Math.floor(pos.x) && e.y === Math.floor(pos.y) && e.z === Math.floor(pos.z));
+            if (isDupe)
+                continue;
+            const label = `${prefix}_${this.entries.filter(e => e.label.startsWith(prefix)).length}`;
+            this.entries.push({ label, x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
+            added++;
+        }
+        if (added > 0) {
+            this.save();
+            console.log(`[Storage] Auto-registered ${added} chest(s) under prefix "${prefix}"`);
+        }
+        return added;
+    }
     // ─── Persistence ───────────────────────────────────────────────────────────
     load() {
         try {
