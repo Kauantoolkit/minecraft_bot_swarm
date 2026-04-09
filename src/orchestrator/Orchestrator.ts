@@ -92,7 +92,7 @@ export class Orchestrator {
   disableAutonomous(): void { this.autonomousMode = false; }
 
   setStoragePos(x: number, y: number, z: number): void {
-    this.state.storagePos = { x, y, z };
+    this.state.storagePos = this.toBlockPos({ x, y, z });
   }
 
   clearStoragePos(): void {
@@ -143,6 +143,7 @@ export class Orchestrator {
 
     const onlineBots = this.repository.findAll().filter(b => b.isOnline());
     if (onlineBots.length === 0) return;
+    this.ensureBasePos();
 
     // Re-assign roles whenever needed
     const roles = assignRoles(onlineBots.length);
@@ -194,13 +195,52 @@ export class Orchestrator {
     return this.state.storagePos;
   }
 
+  private ensureBasePos(): void {
+    if (this.state.basePos) return;
+    const firstWithPos = Array.from(this.state.bots.values()).find(r => !!r.position)?.position;
+    if (!firstWithPos) return;
+    this.state.basePos = this.toBlockPos(firstWithPos);
+    console.log(`[Orchestrator] basePos set to (${this.state.basePos.x}, ${this.state.basePos.y}, ${this.state.basePos.z})`);
+  }
+
+  private toBlockPos(pos: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+    return {
+      x: Math.floor(pos.x),
+      y: Math.floor(pos.y),
+      z: Math.floor(pos.z),
+    };
+  }
+
+  private hasDepositableItems(rec: BotRecord): boolean {
+    const keepPattern = /(pickaxe|axe|shovel|hoe|sword|helmet|chestplate|leggings|boots|shield|bow|crossbow|fishing_rod|shears)$/;
+    return rec.inventory.some(i => i.count > 0 && !keepPattern.test(i.name));
+  }
+
   private selectTask(rec: BotRecord): TaskDescriptor | null {
     const { phase } = this.state;
     const chestPos = this.resolveChest(rec);
+    const hasAnyStorage = this.storage.list().length > 0;
 
     switch (rec.role) {
 
       case 'miner': {
+        // Bootstrap safety: if no storage exists yet, any miner can bootstrap
+        // the first chest so 1-3 bot colonies are not blocked waiting for a builder.
+        if (!hasAnyStorage) {
+          const base = this.state.basePos ?? this.toBlockPos(rec.position ?? { x: 0, y: 64, z: 0 });
+          return {
+            id: this.nextId(),
+            type: 'build_storage',
+            params: {
+              storageLabel: 'base_0',
+              centerX: base.x + 2,
+              centerY: base.y,
+              centerZ: base.z,
+              chestCount: 1,
+            },
+          };
+        }
+
         // Deposit first if carrying a lot
         if (isInventoryFull(rec) && chestPos) {
           return { id: this.nextId(), type: 'deposit', params: { chestPos } };
@@ -213,27 +253,46 @@ export class Orchestrator {
       }
 
       case 'hauler':
-        if (!chestPos) return this.idle(5_000);
-        return { id: this.nextId(), type: 'deposit', params: { chestPos } };
+        if (chestPos && this.hasDepositableItems(rec)) {
+          return { id: this.nextId(), type: 'deposit', params: { chestPos } };
+        }
+        return this.idle(8_000);
 
       case 'farmer':
-        return { id: this.nextId(), type: 'farm', params: { centerX: 0, centerZ: 0, radius: 16 } };
+        return {
+          id: this.nextId(),
+          type: 'farm',
+          params: {
+            centerX: this.state.basePos?.x ?? rec.position?.x ?? 0,
+            centerZ: this.state.basePos?.z ?? rec.position?.z ?? 0,
+            radius: 16,
+          },
+        };
 
       case 'soldier':
-        return { id: this.nextId(), type: 'guard', params: { x: 0, y: 64, z: 0, radius: 32 } };
+        return {
+          id: this.nextId(),
+          type: 'guard',
+          params: {
+            x: this.state.basePos?.x ?? rec.position?.x ?? 0,
+            y: this.state.basePos?.y ?? rec.position?.y ?? 64,
+            z: this.state.basePos?.z ?? rec.position?.z ?? 0,
+            radius: 24,
+          },
+        };
 
       case 'builder': {
         // If no storage exists at all, the builder's first job is to construct one
-        const hasAnyStorage = this.storage.list().length > 0 || this.state.storagePos !== null;
         if (!hasAnyStorage) {
+          const base = this.state.basePos ?? this.toBlockPos(rec.position ?? { x: 0, y: 64, z: 0 });
           return {
             id: this.nextId(),
             type: 'build_storage',
             params: {
               storageLabel: 'base',
-              centerX: rec.position?.x ?? 0,
-              centerY: (rec.position?.y ?? 64),
-              centerZ: (rec.position?.z ?? 0) + 3,
+              centerX: base.x + 3,
+              centerY: base.y,
+              centerZ: base.z,
               chestCount: 4,
             },
           };

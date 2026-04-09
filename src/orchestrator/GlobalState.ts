@@ -25,6 +25,7 @@ export interface BotRecord extends BotSnapshot {
 /** Shared colony state — lives in the main thread only. */
 export interface GlobalState {
   bots:          Map<string, BotRecord>;
+  basePos:       SerializedVec3 | null;
   storagePos:    SerializedVec3 | null;
   resources:     Map<string, number>;  // item name → approx count in storage
   threats:       Set<string>;          // hostile player usernames
@@ -34,6 +35,7 @@ export interface GlobalState {
 export function createGlobalState(): GlobalState {
   return {
     bots:       new Map(),
+    basePos:    null,
     storagePos: null,
     resources:  new Map(),
     threats:    new Set(),

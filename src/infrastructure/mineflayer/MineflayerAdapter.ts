@@ -343,9 +343,10 @@ export class MineflayerAdapter implements IBotAdapter {
     if (!chestItem) throw new Error('No chest in inventory');
 
     // Navigate close enough to place
-    const { createMovements } = await import('./physics/PhysicsPatch');
+    const { createDryMovements } = await import('./physics/PhysicsPatch');
     const { goals } = await import('mineflayer-pathfinder');
-    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    // Chest placement should avoid water paths to prevent drown/stuck loops.
+    mfBot.pathfinder.setMovements(createDryMovements(mfBot));
     await new Promise<void>(res => {
       mfBot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 3));
       mfBot.once('goal_reached', res);
@@ -403,4 +404,3 @@ export class MineflayerAdapter implements IBotAdapter {
     }
   }
 }
-
