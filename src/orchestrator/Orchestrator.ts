@@ -11,6 +11,7 @@ import type { BotSnapshot, TaskDescriptor } from '../ipc/messages';
 
 const TICK_MS    = 2_000;  // how often the Orchestrator wakes up
 const MAX_FAILS  = 3;      // pause autonomous assignment for a bot after N consecutive failures
+const FAIL_COOLDOWN_MS = 30_000;
 
 /**
  * Central brain — runs in the main thread on a fixed tick interval.
@@ -162,9 +163,10 @@ export class Orchestrator {
       if (rec.taskStatus === 'running') continue;
       if (this.paused.has(bot.id)) continue;
       if (rec.failCount >= MAX_FAILS) {
-        // Cool down: reset fail count and idle for one tick
+        // Cool down bots that are failing in loops (e.g. no resources nearby).
         rec.failCount = 0;
-        this.adapter.assignTask(bot.id, { id: this.nextId(), type: 'idle', params: { durationMs: 10_000 } });
+        this.pauseBot(bot.id, FAIL_COOLDOWN_MS);
+        this.adapter.assignTask(bot.id, { id: this.nextId(), type: 'idle', params: { durationMs: 15_000 } });
         continue;
       }
 
@@ -216,38 +218,44 @@ export class Orchestrator {
     return rec.inventory.some(i => i.count > 0 && !keepPattern.test(i.name));
   }
 
+  private isDesignatedStorageBuilder(rec: BotRecord): boolean {
+    const connected = Array.from(this.state.bots.values()).filter(r => r.connected);
+    if (connected.length === 0) return true;
+
+    const builders = connected.filter(r => r.role === 'builder');
+    const candidates = (builders.length > 0 ? builders : connected.filter(r => r.role === 'miner'))
+      .sort((a, b) => a.botId.localeCompare(b.botId));
+
+    return candidates[0]?.botId === rec.botId;
+  }
+
   private selectTask(rec: BotRecord): TaskDescriptor | null {
     const { phase } = this.state;
     const chestPos = this.resolveChest(rec);
     const hasAnyStorage = this.storage.list().length > 0;
 
     switch (rec.role) {
-
       case 'miner': {
-        // Bootstrap safety: if no storage exists yet, any miner can bootstrap
-        // the first chest so 1-3 bot colonies are not blocked waiting for a builder.
         if (!hasAnyStorage) {
+          if (!this.isDesignatedStorageBuilder(rec)) return this.idle(8_000);
           const base = this.state.basePos ?? this.toBlockPos(rec.position ?? { x: 0, y: 64, z: 0 });
           return {
             id: this.nextId(),
             type: 'build_storage',
-            params: {
-              storageLabel: 'base_0',
-              centerX: base.x + 2,
-              centerY: base.y,
-              centerZ: base.z,
-              chestCount: 1,
-            },
+            params: { storageLabel: 'base_0', centerX: base.x + 2, centerY: base.y, centerZ: base.z, chestCount: 1 },
           };
         }
 
-        // Deposit first if carrying a lot
         if (isInventoryFull(rec) && chestPos) {
           return { id: this.nextId(), type: 'deposit', params: { chestPos } };
         }
+
         if (phase === 'bootstrap') {
-          return { id: this.nextId(), type: 'collect_wood', params: { count: 32, chestPos: chestPos ?? undefined } };
+          if (rec.failCount >= 2) return { id: this.nextId(), type: 'explore', params: { direction: 'auto' } };
+          // Correção: blockName 'any_log' para evitar travamentos por madeira específica
+          return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: chestPos ?? undefined } };
         }
+
         const blockName = mineTargetForPhase(phase);
         return { id: this.nextId(), type: 'mine', params: { blockName, count: 32, chestPos: chestPos ?? undefined } };
       }
@@ -282,25 +290,19 @@ export class Orchestrator {
         };
 
       case 'builder': {
-        // If no storage exists at all, the builder's first job is to construct one
         if (!hasAnyStorage) {
+          if (!this.isDesignatedStorageBuilder(rec)) return this.idle(8_000);
           const base = this.state.basePos ?? this.toBlockPos(rec.position ?? { x: 0, y: 64, z: 0 });
           return {
             id: this.nextId(),
             type: 'build_storage',
-            params: {
-              storageLabel: 'base',
-              centerX: base.x + 3,
-              centerY: base.y,
-              centerZ: base.z,
-              chestCount: 4,
-            },
+            params: { storageLabel: 'base', centerX: base.x + 3, centerY: base.y, centerZ: base.z, chestCount: 4 },
           };
         }
-        // Otherwise gather materials or deposit
         if (isInventoryFull(rec) && chestPos) {
           return { id: this.nextId(), type: 'deposit', params: { chestPos } };
         }
+        // Correção: Builder também utiliza 'any_log' para coletar suprimentos
         return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: chestPos ?? undefined } };
       }
 

@@ -15,6 +15,9 @@ export interface BotMeta {
   /** Companion path_update listener installed alongside pvpListener by follow(). */
   followPathUpdateListener?: (r: { status: string }) => void;
 
+
+  isInterrupted?: boolean;
+
   // ── Guard / Bodyguard (shared slot — last writer wins) ──────────────────
   /** Installed by guard() and bodyguard(). Starting either removes the other. */
   guardListener?: () => void;

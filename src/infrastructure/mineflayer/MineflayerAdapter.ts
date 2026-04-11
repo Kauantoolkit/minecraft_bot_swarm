@@ -25,7 +25,6 @@ import { CraftingBehavior } from './behaviors/CraftingBehavior';
 import { Vec3 } from 'vec3';
 import type { IBotAdapter } from './IBotAdapter';
 
-// Hostile mobs the defend mode will react to
 const HOSTILE_MOBS = new Set([
   'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman',
   'witch', 'pillager', 'vindicator', 'ravager', 'phantom', 'drowned',
@@ -35,14 +34,8 @@ const HOSTILE_MOBS = new Set([
   'zoglin', 'hoglin', 'warden',
 ]);
 
-// Aerial mobs that cannot be reached by ground pathfinding.
-// For these, the bot stays in place and only swings when they swoop close enough,
-// instead of using GoalFollow which produces endless partial/noPath cycles and
-// leaves the bot jumping in the air trying to reach an unreachable position.
 const AERIAL_MOBS = new Set(['phantom', 'ghast', 'blaze', 'bat', 'bee', 'vex']);
-
-const CREEPER_FLEE_RADIUS = 7;
-
+const CREEPER_FLEE_RADIUS = 5;
 
 export class MineflayerAdapter implements IBotAdapter {
   private readonly metaStore = new MetaStore();
@@ -63,7 +56,6 @@ export class MineflayerAdapter implements IBotAdapter {
     return this.metaStore.get(bot);
   }
 
-  /** Returns the current active mode string for display in the debug UI. */
   getMode(bot: Bot): string {
     const meta = this.metaStore.get(bot);
     if (!meta) return 'idle';
@@ -71,9 +63,6 @@ export class MineflayerAdapter implements IBotAdapter {
     const hasDefend = !!(meta as { defendListener?: unknown }).defendListener;
     return hasDefend && !primary.startsWith('defend') ? `${primary}+defend` : primary;
   }
-
-
-  // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   spawn(domainBot: Bot, options: ConnectionOptions): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -91,8 +80,6 @@ export class MineflayerAdapter implements IBotAdapter {
       mfBot.loadPlugin(pathfinder);
       domainBot.attachHandle(mfBot);
 
-      // physicsTick is only emitted when physicsEnabled=true, so we can't use it as a watchdog.
-      // Use setInterval instead — runs on the JS event loop regardless of physics state.
       const physicsGuard = setInterval(() => {
         if (!mfBot.physicsEnabled) {
           mfBot.physicsEnabled = true;
@@ -102,22 +89,28 @@ export class MineflayerAdapter implements IBotAdapter {
       mfBot.once('end', () => clearInterval(physicsGuard));
 
       let resolved = false;
+
       mfBot.on('spawn', () => {
-        // Ensure physics is always on — plugins like baritone can leave it disabled
+        // Configurações de Pathfinder e Physics
         mfBot.physicsEnabled = true;
-        // Limit A* CPU: default tickTimeout=40ms × 10 bots = 400ms blocked per tick
-        mfBot.pathfinder.tickTimeout = 10;
-        (mfBot.pathfinder as unknown as Record<string, unknown>).searchRadius = 64;
-        // Clear any stuck movement keys and active path from previous life
+        mfBot.pathfinder.tickTimeout = 100;
+        (mfBot.pathfinder as any).searchRadius = 64;
+        
         mfBot.clearControlStates();
         mfBot.pathfinder.stop();
         mfBot.pathfinder.setMovements(createMovements(mfBot));
         
-        // 🔧 Physics freeze fix for 1.21 velocity NaN bug
         installPhysicsPatches(domainBot);
 
-        // Auto-defend: always active from first spawn so bots aren't defenceless.
+        // Auto-defend e listener de interrupção
         this.defendBehavior.start(domainBot, 16);
+
+        mfBot.on('path_update', () => {
+          const meta = this.getMeta(domainBot);
+          if (meta && meta.activeMode === 'defending') { 
+            meta.isInterrupted = true;
+          }
+        });
 
         domainBot.setState(BotState.CONNECTED);
         if (!resolved) {
@@ -126,12 +119,9 @@ export class MineflayerAdapter implements IBotAdapter {
           resolve();
         } else {
           console.log(`[MineflayerAdapter] ${domainBot.username} respawned`);
-          // Active listeners (pvp/bodyguard/follow) will naturally re-engage
-          // via their per-tick logic once they see the target again
         }
       });
 
-      // Auto-respawn when bot dies (sends the "Respawn" packet after 1.5 s)
       mfBot.on('death', () => {
         console.warn(`[MineflayerAdapter] ${domainBot.username} died — respawning in 1.5 s`);
         setTimeout(() => {
@@ -150,15 +140,11 @@ export class MineflayerAdapter implements IBotAdapter {
         console.warn(`[MineflayerAdapter] ${domainBot.username} kicked: ${reason}`);
       });
 
-      // Health monitoring — auto-eat + log low health
       mfBot.on('health', () => {
         const health = mfBot.health;
         if (health < 10) {
           console.warn(`[${ts()}] ${domainBot.username}: Low health (${health}) → attempting eat`);
           this.eat(domainBot).catch(() => {});
-        }
-        if (health <= 5) {
-          console.error(`[${ts()}] ${domainBot.username}: Critical health (${health})!`);
         }
       });
 
@@ -176,8 +162,6 @@ export class MineflayerAdapter implements IBotAdapter {
     mfBot.quit();
     domainBot.setState(BotState.DISCONNECTED);
   }
-
-  // ─── Movement ─────────────────────────────────────────────────────────────
 
   moveTo(domainBot: Bot, x: number, y: number, z: number): Promise<void> {
     return this.movementBehavior.moveTo(domainBot, x, y, z);
@@ -203,15 +187,11 @@ export class MineflayerAdapter implements IBotAdapter {
     this.getMeta(domainBot).activeMode = 'idle';
   }
 
-  // ─── Chat ─────────────────────────────────────────────────────────────────
-
   say(domainBot: Bot, message: string): void {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
     mfBot.chat(message);
   }
-
-  // ─── Combat ───────────────────────────────────────────────────────────────
 
   attack(domainBot: Bot, targetUsername: string): void {
     this.combatBehavior.attack(domainBot, targetUsername);
@@ -225,9 +205,6 @@ export class MineflayerAdapter implements IBotAdapter {
     this.combatBehavior.stopPvp(domainBot);
   }
 
-
-  // ─── Combat — Guard position ──────────────────────────────────────────────
-
   guard(domainBot: Bot, x: number, y: number, z: number, radius: number, excludeUsernames: string[], relations?: PlayerRelationshipStore): void {
     this.guardBehavior.guard(domainBot, x, y, z, radius, excludeUsernames, relations);
   }
@@ -236,14 +213,9 @@ export class MineflayerAdapter implements IBotAdapter {
     this.guardBehavior.stopGuard(domainBot);
   }
 
-  // ─── Combat — Bodyguard mode ──────────────────────────────────────────────
-
   bodyguard(domainBot: Bot, protectedUsername: string, radius: number, swarmUsernames: string[], relations?: PlayerRelationshipStore, intel?: SwarmIntel): void {
     this.guardBehavior.bodyguard(domainBot, protectedUsername, radius, swarmUsernames, relations, intel);
   }
-
-
-  // ─── Combat — Defend mode (background) ───────────────────────────────────
 
   startDefend(domainBot: Bot, radius: number): void {
     this.defendBehavior.start(domainBot, radius);
@@ -252,10 +224,6 @@ export class MineflayerAdapter implements IBotAdapter {
   stopDefend(domainBot: Bot): void {
     this.defendBehavior.stop(domainBot);
   }
-
-  // ─── Resource collection ──────────────────────────────────────────────────
-
-  // ─── Resource collection ──────────────────────────────────────────────────
 
   collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn, scaffold = false): Promise<void> {
     return this.miningBehavior.collect(domainBot, blockName, count, onFull, scaffold);
@@ -277,13 +245,9 @@ export class MineflayerAdapter implements IBotAdapter {
     return this.storageBehavior.withdraw(domainBot, chestPos, itemName, count);
   }
 
-  // ─── Building ─────────────────────────────────────────────────────────────
-
   buildFromQueue(domainBot: Bot, queue: BuildQueue): Promise<void> {
     return this.buildBehavior.buildFromQueue(domainBot, queue);
   }
-
-  // ─── Inventory ────────────────────────────────────────────────────────────
 
   equip(domainBot: Bot, itemName: string): Promise<void> {
     return this.inventoryBehavior.equip(domainBot, itemName);
@@ -293,8 +257,6 @@ export class MineflayerAdapter implements IBotAdapter {
     return this.inventoryBehavior.eat(domainBot);
   }
 
-  // ─── Farm ─────────────────────────────────────────────────────────────────
-
   farm(domainBot: Bot, centerX: number, centerZ: number, radius: number): Promise<void> {
     return this.farmBehavior.farm(domainBot, centerX, centerZ, radius);
   }
@@ -302,8 +264,6 @@ export class MineflayerAdapter implements IBotAdapter {
   stopFarm(domainBot: Bot): void {
     this.farmBehavior.stopFarm(domainBot);
   }
-
-  // ─── Explore ──────────────────────────────────────────────────────────────
 
   explore(domainBot: Bot, direction: 'north' | 'south' | 'east' | 'west' | 'auto'): Promise<void> {
     return this.exploreBehavior.explore(domainBot, direction);
@@ -313,8 +273,6 @@ export class MineflayerAdapter implements IBotAdapter {
     this.exploreBehavior.stopExplore(domainBot);
   }
 
-  // ─── Avoid player ─────────────────────────────────────────────────────────
-
   avoid(domainBot: Bot, targetUsernames: string[], triggerRadius: number): void {
     this.avoidBehavior.avoid(domainBot, targetUsernames, triggerRadius);
   }
@@ -323,61 +281,44 @@ export class MineflayerAdapter implements IBotAdapter {
     this.avoidBehavior.stopAvoid(domainBot);
   }
 
-  // ─── Crafting ─────────────────────────────────────────────────────────────
-
   craftItem(domainBot: Bot, itemName: string, count: number): Promise<void> {
     return this.craftingBehavior.craft(domainBot, itemName, count);
   }
 
-  /**
-   * Navigate to (x, y, z), equip a chest from inventory, and place it on the
-   * block below. Returns the final placed Vec3 or null on failure.
-   */
   async placeChest(domainBot: Bot, x: number, y: number, z: number): Promise<Vec3 | null> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return null;
 
-    const chestItem = mfBot.inventory.items().find(
-      (i: { name: string }) => i.name === 'chest',
-    );
+    const chestItem = mfBot.inventory.items().find((i: { name: string }) => i.name === 'chest');
     if (!chestItem) throw new Error('No chest in inventory');
 
-    // Navigate close enough to place
     const { createDryMovements } = await import('./physics/PhysicsPatch');
     const { goals } = await import('mineflayer-pathfinder');
-    // Chest placement should avoid water paths to prevent drown/stuck loops.
     mfBot.pathfinder.setMovements(createDryMovements(mfBot));
+    
     await new Promise<void>(res => {
       mfBot.pathfinder.setGoal(new goals.GoalNear(x, y, z, 3));
       mfBot.once('goal_reached', res);
       setTimeout(res, 15_000);
     });
 
-    const targetPos   = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
+    const targetPos = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
     const belowTarget = mfBot.blockAt(targetPos.offset(0, -1, 0));
     if (!belowTarget) throw new Error(`No block below (${x},${y},${z})`);
 
-    await mfBot.equip(chestItem as Parameters<MineflayerBot['equip']>[0], 'hand');
+    await mfBot.equip(chestItem as any, 'hand');
     await mfBot.lookAt(targetPos, true);
     await mfBot.placeBlock(belowTarget, new Vec3(0, 1, 0));
 
-    console.log(`[Adapter] ${domainBot.username}: placed chest at (${x},${y},${z})`);
     return targetPos;
   }
-
-  // ─── Storage scan (worker-safe) ───────────────────────────────────────────
 
   scanNearbyChests(domainBot: Bot, x: number, y: number, z: number, radius: number): Promise<Array<{ x: number; y: number; z: number }>> {
     return this.storageBehavior.scanNearbyChests(domainBot, x, y, z, radius);
   }
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────
-
-  private async autoEquipToolFor(mfBot: MineflayerBot, block: ReturnType<MineflayerBot['blockAt']>, mcData: unknown): Promise<void> {
+  private async autoEquipToolFor(mfBot: MineflayerBot, block: any, mcData: any): Promise<void> {
     if (!block) return;
-    const md = mcData as Record<string, unknown>;
-
-    // Tool preference order per harvest type
     const TOOL_PRIORITY: Record<string, string[]> = {
       pickaxe: ['netherite_pickaxe','diamond_pickaxe','iron_pickaxe','stone_pickaxe','wooden_pickaxe','golden_pickaxe'],
       axe:     ['netherite_axe','diamond_axe','iron_axe','stone_axe','wooden_axe','golden_axe'],
@@ -386,18 +327,17 @@ export class MineflayerAdapter implements IBotAdapter {
       sword:   ['netherite_sword','diamond_sword','iron_sword','stone_sword','wooden_sword','golden_sword'],
     };
 
-    const blockDef = (md['blocks'] as Record<number, { harvestTools?: Record<string, boolean> }>)[block.type];
+    const blockDef = mcData.blocks[block.type];
     if (!blockDef?.harvestTools) return;
-
     const validToolIds = new Set(Object.keys(blockDef.harvestTools).map(Number));
 
     for (const tools of Object.values(TOOL_PRIORITY)) {
       for (const toolName of tools) {
-        const toolDef = (md['itemsByName'] as Record<string, { id: number }>)[toolName];
+        const toolDef = mcData.itemsByName[toolName];
         if (!toolDef || !validToolIds.has(toolDef.id)) continue;
-        const item = (mfBot.inventory.items() as Array<{ type: number }>).find(i => i.type === toolDef.id);
+        const item = mfBot.inventory.items().find(i => i.type === toolDef.id);
         if (item) {
-          await mfBot.equip(item as Parameters<MineflayerBot['equip']>[0], 'hand');
+          await mfBot.equip(item as any, 'hand');
           return;
         }
       }

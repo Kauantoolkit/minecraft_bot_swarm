@@ -35,10 +35,19 @@ import type {
  *   'disconnected'   (botId: string, reason: string)
  */
 export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
+  private static readonly CMD_TIMEOUT_MS = 30_000;
   private readonly workers   = new Map<string, Worker>();
   private readonly snapshots = new Map<string, BotSnapshot>();
   private reqCounter = 0;
-  private readonly pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private readonly pending = new Map<
+    string,
+    {
+      botId: string;
+      timeout: ReturnType<typeof setTimeout>;
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+    }
+  >();
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -83,19 +92,39 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
 
       worker.on('error', err => {
         settle(() => reject(err));
+        this.rejectPendingForBot(domainBot.id, `worker error: ${err.message}`);
+        this.emit('disconnected', domainBot.id, `worker error: ${err.message}`);
         console.error(`[WorkerAdapter] Worker for ${domainBot.username} threw: ${err.message}`);
       });
 
       worker.on('exit', code => {
         this.workers.delete(domainBot.id);
         domainBot.setState(BotState.DISCONNECTED);
+        this.rejectPendingForBot(domainBot.id, `worker exited with code ${code}`);
+        this.emit('disconnected', domainBot.id, `worker exited with code ${code}`);
         if (code !== 0) settle(() => reject(new Error(`Worker exited with code ${code}`)));
       });
     });
   }
 
+  private rejectPendingForBot(botId: string, reason: string): void {
+    for (const [reqId, pending] of this.pending.entries()) {
+      if (pending.botId !== botId) continue;
+      clearTimeout(pending.timeout);
+      this.pending.delete(reqId);
+      pending.reject(new Error(reason));
+    }
+  }
+
   private handleMessage(domainBot: Bot, msg: WorkerToMainMsg): void {
     switch (msg.type) {
+      case 'ERROR':
+        domainBot.setState(BotState.ERROR);
+        this.rejectPendingForBot(domainBot.id, msg.error);
+        console.error(`[WorkerAdapter] ${domainBot.username} error: ${msg.error}`);
+        this.emit('disconnected', domainBot.id, msg.error);
+        break;
+
       case 'STATE_UPDATE':
         this.snapshots.set(domainBot.id, msg.snapshot);
         domainBot.setState(msg.snapshot.connected ? BotState.CONNECTED : BotState.DISCONNECTED);
@@ -104,6 +133,7 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
 
       case 'DISCONNECTED':
         domainBot.setState(BotState.DISCONNECTED);
+        this.rejectPendingForBot(domainBot.id, msg.reason);
         this.emit('disconnected', domainBot.id, msg.reason);
         break;
 
@@ -118,6 +148,7 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
       case 'CMD_RESULT': {
         const resolver = this.pending.get(msg.reqId);
         if (resolver) {
+          clearTimeout(resolver.timeout);
           this.pending.delete(msg.reqId);
           msg.success ? resolver.resolve(msg.value ?? undefined) : resolver.reject(new Error(msg.error ?? 'cmd error'));
         }
@@ -172,7 +203,24 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
   private sendAsync<T = void>(botId: string, buildMsg: (reqId: string) => MainToWorkerMsg): Promise<T> {
     const reqId = this.nextReqId();
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(reqId, { resolve: resolve as (v: unknown) => void, reject });
+      const worker = this.workers.get(botId);
+      if (!worker) {
+        reject(new Error(`bot worker not found: ${botId}`));
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        this.pending.delete(reqId);
+        reject(new Error(`command timeout after ${WorkerCommandAdapter.CMD_TIMEOUT_MS}ms`));
+      }, WorkerCommandAdapter.CMD_TIMEOUT_MS);
+
+      this.pending.set(reqId, {
+        botId,
+        timeout,
+        resolve: resolve as (v: unknown) => void,
+        reject,
+      });
+
       this.send(botId, buildMsg(reqId));
     });
   }

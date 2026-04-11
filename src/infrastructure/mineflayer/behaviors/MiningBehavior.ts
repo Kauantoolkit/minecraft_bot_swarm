@@ -42,8 +42,12 @@ function isBlockUnderwater(mfBot: MineflayerBot, pos: Vec3 | null): boolean {
   if (!pos) return false;
   const above = mfBot.blockAt(pos.offset(0, 1, 0));
   const self  = mfBot.blockAt(pos);
-  if (above && WATER_NAMES.has(above.name)) return true;
-  if (self  && WATER_NAMES.has(self.name))  return true;
+  
+  // Se o bot não conhece o bloco (null), tratamos como inacessível/perigoso
+  if (!above || !self) return true; 
+
+  if (WATER_NAMES.has(above.name)) return true;
+  if (WATER_NAMES.has(self.name))  return true;
   if (self?.getProperties?.()?.['waterlogged'] === true) return true;
   return false;
 }
@@ -58,18 +62,18 @@ function isBlockUnderwater(mfBot: MineflayerBot, pos: Vec3 | null): boolean {
 function isBlockAccessible(mfBot: MineflayerBot, pos: Vec3 | null): boolean {
   if (!pos) return false;
 
-  // Top face exposed — most common case for surface collection
   const above = mfBot.blockAt(pos.offset(0, 1, 0));
-  if (!above || above.boundingBox !== 'block') return true;
+  // Se 'above' for null, não sabemos se é seguro
+  if (!above) return false; 
+  if (above.boundingBox !== 'block') return true;
 
-  // Any horizontal side exposed at the same Y (bot can stand next to it)
   const sides = [
     pos.offset(1, 0, 0), pos.offset(-1, 0, 0),
     pos.offset(0, 0, 1), pos.offset(0, 0, -1),
   ];
   for (const side of sides) {
     const b = mfBot.blockAt(side);
-    if (!b || b.boundingBox !== 'block') return true;
+    if (b && b.boundingBox !== 'block') return true; // Adicionado check 'b &&'
   }
 
   return false;
@@ -84,7 +88,20 @@ const TOOL_PRIORITY: Record<string, string[]> = {
   sword:   ['netherite_sword','diamond_sword','iron_sword','stone_sword','wooden_sword','golden_sword'],
 };
 
+const MISSING_BLOCK_LOG_COOLDOWN_MS = 15_000;
+
 export class MiningBehavior {
+  private readonly lastMissingBlockLog = new Map<string, number>();
+
+  private logMissingTarget(username: string, blockName: string, detail: string): void {
+    const key = `${username}:${blockName}`;
+    const now = Date.now();
+    const last = this.lastMissingBlockLog.get(key) ?? 0;
+    if (now - last < MISSING_BLOCK_LOG_COOLDOWN_MS) return;
+    this.lastMissingBlockLog.set(key, now);
+    console.warn(`[Mining] ${username}: no "${blockName}" in range (${detail})`);
+  }
+
   // ─── Private helpers ───────────────────────────────────────────────────────
 
   /** Equips the best available tool for the given block. No-op if no tool found. */
@@ -239,7 +256,11 @@ export class MiningBehavior {
         const pos = mfBot.entity?.position;
         const posStr = pos ? `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}` : '?';
         const rawBlock = mfBot.findBlock({ matching: b => b.name.includes('log'), maxDistance: 128 });
-        console.warn(`[Mining] ${domainBot.username}: no "${blockName}" in range (pos=${posStr}, anyLog=${rawBlock?.name ?? 'none'}@${rawBlock ? `${Math.floor(rawBlock.position.x)},${Math.floor(rawBlock.position.y)},${Math.floor(rawBlock.position.z)}` : '?'})`);
+        this.logMissingTarget(
+          domainBot.username,
+          blockName,
+          `pos=${posStr}, anyLog=${rawBlock?.name ?? 'none'}@${rawBlock ? `${Math.floor(rawBlock.position.x)},${Math.floor(rawBlock.position.y)},${Math.floor(rawBlock.position.z)}` : '?'}`,
+        );
         break;
       }
       const mined = await this.safeDig(mfBot, domainBot.username, block.position, blockName, mcData);
@@ -328,7 +349,7 @@ export class MiningBehavior {
         maxDistance: 128,
       });
       if (!block) {
-        console.warn(`[Mining] ${domainBot.username}: no "${blockName}" in range`);
+        this.logMissingTarget(domainBot.username, blockName, 'vein mode');
         break;
       }
       await tryDigAt(block.position);

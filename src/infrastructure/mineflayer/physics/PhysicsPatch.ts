@@ -55,11 +55,15 @@ const SCAFFOLDING_BLOCK_NAMES = [
 type McData = { blocksByName: Record<string, { id: number } | undefined>; itemsByName: Record<string, { id: number } | undefined> };
 
 function buildMovements(mfBot: MineflayerBot, avoidWater: boolean, scaffold = false): Movements {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mcData = require('minecraft-data')(mfBot.version) as McData;
   const movements = new Movements(mfBot);
-  movements.allowSprinting = true;
-  movements.maxDropDown    = 3;
+  
+  // 1. Desative Sprint para evitar dessincronia com os Physics Patches
+  movements.allowSprinting = false; 
+  movements.maxDropDown = 3;
+  
+  // 2. Garanta que o bot possa quebrar folhas para chegar no tronco
+  movements.canDig = true;
 
   const avoid = avoidWater
     ? [...FATAL_BLOCK_NAMES, ...WATER_BLOCK_NAMES]
@@ -70,25 +74,17 @@ function buildMovements(mfBot: MineflayerBot, avoidWater: boolean, scaffold = fa
     if (block) movements.blocksToAvoid.add(block.id);
   }
 
-  if (!avoidWater) {
-    // General travel: water is traversable but 10× more costly than land.
-    (movements as unknown as Record<string, unknown>)['liquidCost'] = 10;
-  }
-
+  // 3. Melhore a lógica de Scaffold para não depender apenas do inventário atual
   if (scaffold) {
-    // Allow the pathfinder to place blocks to climb up (like Baritone).
-    (movements as unknown as Record<string, unknown>)['canDig'] = true;
-    (movements as unknown as Record<string, unknown>)['allow1by1towers'] = true;
-    const scaffoldIds: number[] = [];
-    const inventoryItems = mfBot.inventory.items() as Array<{ type: number }>;
-    for (const name of SCAFFOLDING_BLOCK_NAMES) {
-      const itemDef = mcData.itemsByName[name];
-      if (!itemDef) continue;
-      if (inventoryItems.some(i => i.type === itemDef.id)) {
-        scaffoldIds.push(itemDef.id);
-      }
-    }
-    (movements as unknown as Record<string, unknown>)['scaffoldingBlocks'] = scaffoldIds;
+    movements.allow1by1towers = true;
+    
+    // Em vez de filtrar o inventário agora, passe os IDs de blocos que 
+    // o bot SABE usar como scaffold (ele vai tentar usar se tiver).
+    const scaffoldIds = SCAFFOLDING_BLOCK_NAMES
+      .map(name => mcData.itemsByName[name]?.id)
+      .filter((id): id is number => id !== undefined);
+      
+    movements.scafoldingBlocks = scaffoldIds;
   }
 
   return movements;
