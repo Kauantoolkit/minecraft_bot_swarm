@@ -43,6 +43,8 @@ export class DefendBehavior {
     let scanTick = 0;
     let lastHurtTime = 0;
     const HURT_COOLDOWN_MS = 1000;
+    // Mobs that returned noPath are ignored for 5 s to prevent rapid attack→disengage loop
+    const noPathBlacklist = new Map<number, number>(); // mobId → expiry timestamp
 
     // Maximum distance the bot will chase a mob from where combat started.
     const MAX_CHASE_DIST = 24;
@@ -92,8 +94,16 @@ export class DefendBehavior {
     // Clear stuck keys when pathfinder gives up
     const onDefendPathUpdate = (r: { status: string }) => {
       if (r.status === 'noPath') {
-        console.warn(`[${ts()}][Defend] ${domainBot.username}: noPath (state=${defendState}) — clearing control states`);
         mfBot.clearControlStates();
+        // Blacklist this mob for 5 s so we don't immediately re-engage
+        if (defendState === 'attacking' && lastThreatId !== null) {
+          noPathBlacklist.set(lastThreatId, Date.now() + 5_000);
+          console.warn(`[${ts()}][Defend] ${domainBot.username}: noPath — blacklisting mob ${lastThreatId} for 5 s`);
+          defendState = 'idle';
+          lastThreatId = null;
+          combatOrigin = null;
+          meta.resumeCallback?.();
+        }
       }
     };
     (mfBot as NodeJS.EventEmitter).on('path_update', onDefendPathUpdate);
@@ -103,6 +113,12 @@ export class DefendBehavior {
       if (!mfBot.entity?.position) return;
 
       type AnyEntity = { type?: string; name?: string; position: Vec3; id: number };
+
+      // While actively digging a block: skip ALL combat actions.
+      // Attacking an entity resets block break progress server-side, causing
+      // an infinite "click" loop. The bot will re-engage after the dig completes.
+      const isDigging = !!meta.digging;
+      if (isDigging) return;
 
       // Attack every tick while in combat
       if (defendState === 'attacking' && lastThreatId !== null) {
@@ -146,12 +162,19 @@ export class DefendBehavior {
         console.log(`[${ts()}][Defend] ${domainBot.username}: fleeing→idle (creeper gone)`);
       }
 
-      // Priority 2 — hostile mobs
+      // Purge expired blacklist entries
+      const now = Date.now();
+      for (const [id, expiry] of noPathBlacklist) {
+        if (now >= expiry) noPathBlacklist.delete(id);
+      }
+
+      // Priority 2 — hostile mobs (skip recently-unreachable ones)
       const allMobs = Object.values(mfBot.entities).filter((e) => {
         const entity = e as AnyEntity;
         return entity.name !== undefined &&
           HOSTILE_MOBS.has(entity.name.toLowerCase()) &&
-          entity.position.distanceTo(mfBot.entity.position) < radius;
+          entity.position.distanceTo(mfBot.entity.position) < radius &&
+          !noPathBlacklist.has(entity.id);
       }) as AnyEntity[];
 
       // Opportunity swing: hit aerial mobs that swoop within melee range

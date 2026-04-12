@@ -54,7 +54,7 @@ export class MineflayerAdapter implements IBotAdapter {
   private readonly farmBehavior      = new FarmBehavior(this.metaStore);
   private readonly exploreBehavior   = new ExploreBehavior(this.metaStore);
   private readonly inventoryBehavior = new InventoryBehavior();
-  private readonly miningBehavior    = new MiningBehavior();
+  private readonly miningBehavior    = new MiningBehavior(this.metaStore);
   private readonly buildBehavior     = new BuildBehavior();
   private readonly storageBehavior   = new StorageBehavior();
   private readonly craftingBehavior  = new CraftingBehavior();

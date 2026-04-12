@@ -30,6 +30,8 @@ export interface BotMeta {
   // ── Async loop flags ─────────────────────────────────────────────────────
   farmingActive?: boolean;
   exploringActive?: boolean;
+  /** True while safeDig is actively breaking a block — DefendBehavior must not clear control states */
+  digging?: boolean;
 
   // ── Cross-mode communication ─────────────────────────────────────────────
   /**

@@ -105,8 +105,9 @@ export class TaskRunner {
           break;
         }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
-        // Pass all wood types at once — MiningBehavior picks the nearest available
-        await this.adapter.collect(this.bot, WOOD_TYPES, count - woodInInventory, onFull, true);
+        // Pass all wood types at once — MiningBehavior picks the nearest accessible block
+        // scaffold=false: bots should not build towers to reach canopy logs (items fall away)
+        await this.adapter.collect(this.bot, WOOD_TYPES, count - woodInInventory, onFull, false);
         break;
       }
 
@@ -238,9 +239,9 @@ export class TaskRunner {
     for (const logStack of logs) {
       this.checkCancelled();
       const plankName = logStack.name.replace('_log', '_planks');
-      const batchLogs = Math.ceil((needed - currentPlanks) / 4);
+      const planksToMake = needed - currentPlanks;
       try {
-        await this.adapter.craftItem(this.bot, plankName, batchLogs);
+        await this.adapter.craftItem(this.bot, plankName, planksToMake);
         return;
       } catch {
         // wrong plank type, try next

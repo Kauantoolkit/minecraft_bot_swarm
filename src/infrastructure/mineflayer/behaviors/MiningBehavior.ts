@@ -4,6 +4,7 @@ import { Vec3 } from 'vec3';
 import { Bot } from '../../../domain/entities/Bot';
 import { BotState } from '../../../domain/value-objects/BotState';
 import { QuarryQueue } from '../../mining/QuarryQueue';
+import { MetaStore } from '../BotMeta';
 import { createMovements, createScaffoldMovements } from '../physics/PhysicsPatch';
 import { isInventoryFull } from './StorageBehavior';
 
@@ -84,10 +85,28 @@ const TOOL_PRIORITY: Record<string, string[]> = {
   sword:   ['netherite_sword','diamond_sword','iron_sword','stone_sword','wooden_sword','golden_sword'],
 };
 
+// Block material → best tool category when harvestTools is absent
+const MATERIAL_TOOL: Record<string, string> = {
+  wood:   'axe',
+  plant:  'axe',
+  leaves: 'axe',
+  rock:   'pickaxe',
+  dirt:   'shovel',
+  sand:   'shovel',
+  clay:   'shovel',
+};
+
 export class MiningBehavior {
+  constructor(private readonly meta: MetaStore) {}
+
   // ─── Private helpers ───────────────────────────────────────────────────────
 
-  /** Equips the best available tool for the given block. No-op if no tool found. */
+  /**
+   * Equips the best available tool for the given block.
+   * 1. If the block defines harvestTools, use those.
+   * 2. Otherwise fall back to MATERIAL_TOOL mapping (e.g. logs → axe).
+   * Adds a short delay after equipping so the server registers the switch.
+   */
   private async autoEquipToolFor(
     mfBot: MineflayerBot,
     block: ReturnType<MineflayerBot['blockAt']>,
@@ -96,20 +115,36 @@ export class MiningBehavior {
     if (!block) return;
     const md = mcData as Record<string, unknown>;
 
-    const blockDef = (md['blocks'] as Record<number, { harvestTools?: Record<string, boolean> }>)[block.type];
-    if (!blockDef?.harvestTools) return;
+    const blockDef = (md['blocks'] as Record<number, { harvestTools?: Record<string, boolean>; material?: string }>)[block.type];
 
-    const validToolIds = new Set(Object.keys(blockDef.harvestTools).map(Number));
+    let toolCategory: string | null = null;
 
-    for (const tools of Object.values(TOOL_PRIORITY)) {
-      for (const toolName of tools) {
-        const toolDef = (md['itemsByName'] as Record<string, { id: number }>)[toolName];
-        if (!toolDef || !validToolIds.has(toolDef.id)) continue;
-        const item = (mfBot.inventory.items() as Array<{ type: number }>).find(i => i.type === toolDef.id);
-        if (item) {
-          await mfBot.equip(item as Parameters<MineflayerBot['equip']>[0], 'hand');
-          return;
+    if (blockDef?.harvestTools) {
+      // Find which TOOL_PRIORITY category contains a valid harvest tool for this block
+      const validToolIds = new Set(Object.keys(blockDef.harvestTools).map(Number));
+      for (const [category, tools] of Object.entries(TOOL_PRIORITY)) {
+        for (const toolName of tools) {
+          const toolDef = (md['itemsByName'] as Record<string, { id: number }>)[toolName];
+          if (toolDef && validToolIds.has(toolDef.id)) { toolCategory = category; break; }
         }
+        if (toolCategory) break;
+      }
+    } else if (blockDef?.material) {
+      toolCategory = MATERIAL_TOOL[blockDef.material] ?? null;
+    }
+
+    if (!toolCategory) return;
+
+    const candidates = TOOL_PRIORITY[toolCategory] ?? [];
+    for (const toolName of candidates) {
+      const toolDef = (md['itemsByName'] as Record<string, { id: number }>)[toolName];
+      if (!toolDef) continue;
+      const item = (mfBot.inventory.items() as Array<{ type: number }>).find(i => i.type === toolDef.id);
+      if (item) {
+        await mfBot.equip(item as Parameters<MineflayerBot['equip']>[0], 'hand');
+        // Give the server a tick to register the item switch
+        await new Promise(r => setTimeout(r, 150));
+        return;
       }
     }
   }
@@ -119,6 +154,7 @@ export class MiningBehavior {
    * Returns true if the block was successfully mined, false if already gone or unreachable.
    */
   private async safeDig(
+    domainBot: Bot,
     mfBot: MineflayerBot,
     pos: Vec3,
     expectedName: string,
@@ -132,32 +168,94 @@ export class MiningBehavior {
     });
 
     const block = mfBot.blockAt(pos);
-    if (!block || block.name !== expectedName) return false;
-    if (block.position.distanceTo(mfBot.entity.position) > 5) return false;
+    if (!block || block.name !== expectedName) {
+      console.warn(`[safeDig] ${domainBot.username}: block gone or changed after nav (expected ${expectedName})`);
+      return false;
+    }
+    const dist = block.position.distanceTo(mfBot.entity.position);
+    if (dist > 5) {
+      console.warn(`[safeDig] ${domainBot.username}: too far after nav (${dist.toFixed(1)}m) for ${expectedName}`);
+      return false;
+    }
 
     await this.autoEquipToolFor(mfBot, block, mcData);
 
-    if (!mfBot.canDigBlock(block)) return false;
+    // Re-fetch block after possible tool equip delay
+    const freshBlock = mfBot.blockAt(pos);
+    if (!freshBlock || freshBlock.name !== expectedName) return false;
 
+    const canDig = mfBot.canDigBlock(freshBlock);
+    const heldItem = (mfBot.heldItem as { name?: string } | null)?.name ?? 'hand';
+    console.log(`[safeDig] ${domainBot.username}: ${expectedName} canDig=${canDig} held=${heldItem} onGround=${mfBot.entity.onGround}`);
+    if (!canDig) return false;
+
+    const botMeta = this.meta.get(domainBot);
+    // Set the flag BEFORE stopping pathfinder — DefendBehavior checks this
+    // on every physicsTick and must see it before any pathfinder event fires.
+    botMeta.digging = true;
     mfBot.pathfinder.stop();
     mfBot.clearControlStates();
+    // Brief settle so the bot lands before digging
+    await new Promise(r => setTimeout(r, 100));
+
+    console.log(`[safeDig] ${domainBot.username}: starting dig ${expectedName} @ ${pos.x},${pos.y},${pos.z}`);
+
+    const tryDig = async (b: NonNullable<ReturnType<MineflayerBot['blockAt']>>): Promise<boolean> => {
+      try {
+        await Promise.race([
+          mfBot.dig(b, true),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('dig timeout')), 30_000)),
+        ]);
+      } catch (err) {
+        console.warn(`[safeDig] ${domainBot.username}: dig() threw: ${(err as Error).message}`);
+        return false;
+      }
+
+      // After dig() resolves (client-side timer done), listen for a server
+      // block_change at this position. If the server restores the block within
+      // 1 s, the dig was rejected. If nothing arrives, the break was accepted.
+      return new Promise<boolean>((resolve) => {
+        let settled = false;
+
+        type BlockChangePacket = { location: { x: number; y: number; z: number }; type: number };
+        const onBlockChange = (packet: BlockChangePacket) => {
+          if (settled) return;
+          if (packet.location.x !== pos.x || packet.location.y !== pos.y || packet.location.z !== pos.z) return;
+          const restoredId = packet.type >> 4; // block state → block id
+          if (restoredId !== 0) {
+            // Server sent back a non-air block → dig rejected
+            settled = true;
+            clearTimeout(timer);
+            (mfBot._client as NodeJS.EventEmitter).removeListener('block_change', onBlockChange);
+            console.warn(`[safeDig] ${domainBot.username}: server rejected dig @ ${pos.x},${pos.y},${pos.z} (block_change received)`);
+            resolve(false);
+          }
+        };
+
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          (mfBot._client as NodeJS.EventEmitter).removeListener('block_change', onBlockChange);
+          const after = mfBot.blockAt(pos);
+          const broke = !after || after.name !== expectedName;
+          console.log(`[safeDig] ${domainBot.username}: after dig @ ${pos.x},${pos.y},${pos.z} → block=${after?.name ?? 'null'} broke=${broke}`);
+          resolve(broke);
+        }, 1000);
+
+        (mfBot._client as NodeJS.EventEmitter).on('block_change', onBlockChange);
+      });
+    };
 
     try {
-      await mfBot.dig(block, true);
-      // Brief pause so the dropped item spawns and the bot can pick it up
-      await new Promise(r => setTimeout(r, 400));
-      return true;
-    } catch {
+      if (await tryDig(freshBlock)) return true;
+
+      // One retry — bot stays in place
       await new Promise(r => setTimeout(r, 300));
       const retry = mfBot.blockAt(pos);
       if (!retry || retry.name !== expectedName || !mfBot.canDigBlock(retry)) return false;
-      mfBot.pathfinder.stop();
-      mfBot.clearControlStates();
-      try {
-        await mfBot.dig(retry, true);
-        await new Promise(r => setTimeout(r, 400));
-        return true;
-      } catch { return false; }
+      return await tryDig(retry);
+    } finally {
+      botMeta.digging = false;
     }
   }
 
@@ -194,11 +292,22 @@ export class MiningBehavior {
         mfBot.pathfinder.setMovements(movementsFn(mfBot));
       }
 
-      // Find nearest block matching ANY of the requested types
-      const block = mfBot.findBlock({
-        matching: b => typeIdToName.has(b.type) && !isBlockUnderwater(mfBot, b.position),
-        maxDistance: 128,
-      });
+      // Find nearest reachable block: prefer accessible blocks near bot's Y level,
+      // fall back to any non-underwater match if none found.
+      const botY = mfBot.entity?.position?.y ?? 0;
+      const block =
+        mfBot.findBlock({
+          matching: b =>
+            typeIdToName.has(b.type) &&
+            !isBlockUnderwater(mfBot, b.position) &&
+            isBlockAccessible(mfBot, b.position) &&
+            Math.abs(b.position.y - botY) <= 4,
+          maxDistance: 64,
+        }) ??
+        mfBot.findBlock({
+          matching: b => typeIdToName.has(b.type) && !isBlockUnderwater(mfBot, b.position),
+          maxDistance: 128,
+        });
       if (!block) {
         const pos = mfBot.entity?.position;
         const posStr = pos ? `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}` : '?';
@@ -207,7 +316,7 @@ export class MiningBehavior {
       }
 
       const foundName = typeIdToName.get(block.type)!;
-      const mined = await this.safeDig(mfBot, block.position, foundName, mcData);
+      const mined = await this.safeDig(domainBot, mfBot, block.position, foundName, mcData);
       if (mined) {
         collected++;
         console.log(`[Mining] ${domainBot.username}: ${foundName} ${collected}/${count}`);
@@ -249,7 +358,7 @@ export class MiningBehavior {
     const veinQueue: Vec3[] = [];
 
     const tryDigAt = async (pos: Vec3): Promise<boolean> => {
-      const mined = await this.safeDig(mfBot, pos, blockName, mcData);
+      const mined = await this.safeDig(domainBot, mfBot, pos, blockName, mcData);
       if (!mined) return false;
 
       collected++;
@@ -324,7 +433,7 @@ export class MiningBehavior {
       const block = mfBot.blockAt(pos);
       if (!block || block.name === 'air' || block.name === 'cave_air') continue;
 
-      const mined = await this.safeDig(mfBot, pos, block.name, mcData);
+      const mined = await this.safeDig(domainBot, mfBot, pos, block.name, mcData);
       if (mined) {
         queue.markDone();
         console.log(`[Quarry] ${domainBot.username}: mined [${queue.progress}]`);
