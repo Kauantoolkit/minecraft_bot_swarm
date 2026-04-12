@@ -110,23 +110,24 @@ export class WebServer {
 
     const bots = Array.from(state.bots.entries()).map(([id, rec]) => ({
       id,
-      username: rec.username,
-      role: rec.role,
-      taskStatus: rec.taskStatus,
-      currentTaskId: rec.currentTaskId,
-      failCount: rec.failCount,
-      paused: pausedIds.includes(id),
-      health: rec.health,
-      food: rec.food,
-      position: rec.position,
-      inventory: rec.inventory,
+      username:        rec.username,
+      role:            rec.role,
+      taskStatus:      rec.taskStatus,
+      currentTaskType: rec.currentTaskType,
+      failCount:       rec.failCount,
+      paused:          pausedIds.includes(id),
+      health:          rec.health,
+      food:            rec.food,
+      position:        rec.position,
+      inventory:       rec.inventory,
+      connected:       rec.connected,
     }));
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      available: true,
-      autonomous: (this.orchestrator as unknown as { autonomousMode: boolean }).autonomousMode,
-      phase: state.phase,
+      available:  true,
+      autonomous: this.orchestrator.isAutonomousEnabled(),
+      phase:      state.phase,
       storagePos: state.storagePos,
       bots,
       pausedIds,
@@ -277,7 +278,12 @@ const HTML_PAGE = `<!DOCTYPE html>
   .bar-fill{height:100%;border-radius:2px;transition:width .3s}
   .bar-hp{background:#3fb950}
   .bar-food{background:#e3b341}
-  .bot-pos{font-size:10px;color:#484f58;margin-bottom:5px}
+  .bot-pos{font-size:10px;color:#484f58;margin-bottom:4px}
+  .bot-inv{font-size:10px;color:#6e7681;margin-bottom:5px;max-height:60px;overflow:hidden;line-height:1.4}
+  .inv-item{display:inline-block;margin-right:6px;white-space:nowrap}
+  .inv-item .cnt{color:#e3b341}
+  .fail-badge{font-size:10px;padding:1px 5px;border-radius:6px;
+    background:#2d1117;color:#f85149;border:1px solid #da3633;margin-left:4px}
   .quick-btns{display:flex;gap:4px;flex-wrap:wrap}
   .qbtn{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:2px 7px;
     border-radius:4px;cursor:pointer;font:11px 'Consolas',monospace;white-space:nowrap}
@@ -398,6 +404,9 @@ const HTML_PAGE = `<!DOCTYPE html>
     <!-- filled by renderPanel() -->
   </div>
 </div>
+
+<h2>Colony Resources (in-transit)</h2>
+<div id="colony-resources"></div>
 
 <h2>Storage</h2>
 <div id="storages"></div>
@@ -559,8 +568,8 @@ function roleBadge(role) {
 
 function taskStatusText(b) {
   if (!b || b.taskStatus === 'idle' || !b.taskStatus) return '<span class="task-idle">idle</span>';
-  if (b.taskStatus === 'running') return '<span class="task-running">running: ' + esc(b.currentTaskId ?? '?') + '</span>';
-  if (b.taskStatus === 'failed') return '<span class="task-failed">failed</span>';
+  if (b.taskStatus === 'running') return '<span class="task-running">▶ ' + esc(b.currentTaskType ?? b.currentTaskId ?? '?') + '</span>';
+  if (b.taskStatus === 'failed')  return '<span class="task-failed">✗ failed' + (b.currentTaskType ? ': ' + esc(b.currentTaskType) : '') + '</span>';
   return '<span>' + esc(b.taskStatus) + '</span>';
 }
 
@@ -577,20 +586,27 @@ function renderBots() {
       ? Math.floor(ob.position.x) + ', ' + Math.floor(ob.position.y) + ', ' + Math.floor(ob.position.z)
       : '—';
 
+    const invHtml = (ob?.inventory?.length > 0)
+      ? ob.inventory.slice(0,8).map(i => \`<span class="inv-item"><span class="cnt">\${i.count}×</span>\${esc(i.name.replace(/_/g,' '))}</span>\`).join('') +
+        (ob.inventory.length > 8 ? \`<span style="color:#484f58"> +\${ob.inventory.length-8} more</span>\` : '')
+      : '<span style="color:#484f58">empty</span>';
+
     return \`<div class="bot-card \${bot.online ? 'online' : 'offline'}\${sel ? ' selected' : ''}"
         onclick="\${bot.online ? 'selectBot(\\'' + bot.id + '\\',\\'' + esc(bot.username) + '\\')' : ''}">
       <div class="top-row">
         <span class="bot-name">\${esc(bot.username)}</span>
         \${ob ? roleBadge(ob.role) : ''}
         \${paused ? '<span class="paused-badge">PAUSED</span>' : ''}
+        \${ob?.failCount > 0 ? '<span class="fail-badge">✗' + ob.failCount + '</span>' : ''}
       </div>
       <div class="bot-status">\${ob ? taskStatusText(ob) : '<span class="task-idle">' + esc(bot.state) + '</span>'}</div>
       \${bot.online && ob ? \`
       <div class="bars">
-        <div class="bar-wrap"><div class="bar-lbl">HP</div><div class="bar-bg"><div class="bar-fill bar-hp" style="width:\${hpPct}%"></div></div></div>
-        <div class="bar-wrap"><div class="bar-lbl">Food</div><div class="bar-bg"><div class="bar-fill bar-food" style="width:\${foodPct}%"></div></div></div>
+        <div class="bar-wrap"><div class="bar-lbl">HP \${ob.health?.toFixed(1)??0}</div><div class="bar-bg"><div class="bar-fill bar-hp" style="width:\${hpPct}%"></div></div></div>
+        <div class="bar-wrap"><div class="bar-lbl">Food \${ob.food??0}</div><div class="bar-bg"><div class="bar-fill bar-food" style="width:\${foodPct}%"></div></div></div>
       </div>
-      <div class="bot-pos">\${pos}</div>\` : ''}
+      <div class="bot-pos">📍 \${pos}</div>
+      <div class="bot-inv">\${invHtml}</div>\` : ''}
       \${bot.online ? \`
       <div class="quick-btns">
         <button class="qbtn red" onclick="event.stopPropagation();botAction('\${esc(bot.username)}','stop')">stop</button>
@@ -705,6 +721,28 @@ function renderStorages() {
     </div>\`).join('');
 }
 
+function renderColonyResources() {
+  const el = document.getElementById('colony-resources');
+  const totals = {};
+  for (const b of orchData.bots) {
+    if (!b.inventory) continue;
+    for (const item of b.inventory) {
+      totals[item.name] = (totals[item.name] || 0) + item.count;
+    }
+  }
+  const entries = Object.entries(totals).sort((a,b) => b[1]-a[1]);
+  if (entries.length === 0) {
+    el.innerHTML = '<span style="color:#6e7681">No items in transit</span>';
+    return;
+  }
+  el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+    entries.map(([name,cnt]) =>
+      \`<span style="background:#161b22;border:1px solid #21262d;border-radius:6px;padding:2px 8px;font-size:11px">
+        <span style="color:#e3b341">\${cnt}×</span> \${esc(name.replace(/_/g,' '))}
+      </span>\`
+    ).join('') + '</div>';
+}
+
 function renderIntel() {
   const el = document.getElementById('intel');
   if (!statusData.intel || statusData.intel.length === 0) {
@@ -764,6 +802,7 @@ async function tick() {
   renderColonyBar();
   renderBots();
   renderPanel();
+  renderColonyResources();
   renderStorages();
   renderIntel();
   renderLog();

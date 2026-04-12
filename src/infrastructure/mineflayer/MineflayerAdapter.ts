@@ -257,7 +257,7 @@ export class MineflayerAdapter implements IBotAdapter {
 
   // ─── Resource collection ──────────────────────────────────────────────────
 
-  collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn, scaffold = false): Promise<void> {
+  collect(domainBot: Bot, blockName: string | string[], count: number, onFull?: DepositFn, scaffold = false): Promise<void> {
     return this.miningBehavior.collect(domainBot, blockName, count, onFull, scaffold);
   }
 

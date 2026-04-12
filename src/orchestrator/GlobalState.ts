@@ -18,8 +18,9 @@ export type ColonyPhase =
 /** Full view of a single bot maintained by the Orchestrator. */
 export interface BotRecord extends BotSnapshot {
   role: Role;
-  failCount: number;    // consecutive task failures — used for role rebalancing
-  lastTaskAt: number;   // epoch ms
+  failCount: number;        // consecutive task failures — used for role rebalancing
+  lastTaskAt: number;       // epoch ms
+  currentTaskType: string | null;  // human-readable task type assigned by Orchestrator
 }
 
 /** Shared colony state — lives in the main thread only. */

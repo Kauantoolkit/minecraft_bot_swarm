@@ -47,22 +47,23 @@ export class Orchestrator {
       } else {
         this.state.bots.set(botId, {
           ...snap,
-          role:       'unassigned',
-          failCount:  0,
-          lastTaskAt: 0,
+          role:            'unassigned',
+          failCount:       0,
+          lastTaskAt:      0,
+          currentTaskType: null,
         });
       }
     });
 
     adapter.on('task_complete', (botId: string, _taskId: string) => {
       const rec = this.state.bots.get(botId);
-      if (rec) { rec.taskStatus = 'idle'; rec.failCount = 0; }
+      if (rec) { rec.taskStatus = 'idle'; rec.failCount = 0; rec.currentTaskType = null; }
     });
 
     adapter.on('task_failed', (botId: string, _taskId: string, error: string) => {
       console.warn(`[Orchestrator] ${botId} failed: ${error}`);
       const rec = this.state.bots.get(botId);
-      if (rec) { rec.taskStatus = 'idle'; rec.failCount++; }
+      if (rec) { rec.taskStatus = 'idle'; rec.failCount++; rec.currentTaskType = null; }
     });
 
     // When a bot disconnects, mark it idle and pause autonomous assignment
@@ -71,7 +72,7 @@ export class Orchestrator {
     adapter.on('disconnected', (botId: string, reason: string) => {
       console.warn(`[Orchestrator] ${botId} disconnected (${reason}) — suspending assignment`);
       const rec = this.state.bots.get(botId);
-      if (rec) { rec.taskStatus = 'idle'; rec.failCount = 0; }
+      if (rec) { rec.taskStatus = 'idle'; rec.failCount = 0; rec.currentTaskType = null; }
       this.pauseBot(botId, 60_000); // hold off for up to 60 s while reconnecting
     });
   }
@@ -88,8 +89,9 @@ export class Orchestrator {
     if (this.ticker) { clearInterval(this.ticker); this.ticker = null; }
   }
 
-  enableAutonomous(): void  { this.autonomousMode = true; }
-  disableAutonomous(): void { this.autonomousMode = false; }
+  enableAutonomous(): void        { this.autonomousMode = true; }
+  disableAutonomous(): void       { this.autonomousMode = false; }
+  isAutonomousEnabled(): boolean  { return this.autonomousMode; }
 
   setStoragePos(x: number, y: number, z: number): void {
     this.state.storagePos = { x, y, z };
@@ -169,8 +171,9 @@ export class Orchestrator {
 
       const task = this.selectTask(rec);
       if (task) {
-        rec.taskStatus = 'running';
-        rec.lastTaskAt = Date.now();
+        rec.taskStatus       = 'running';
+        rec.lastTaskAt       = Date.now();
+        rec.currentTaskType  = task.type;
         this.adapter.assignTask(bot.id, task);
       }
     }
@@ -212,9 +215,12 @@ export class Orchestrator {
         return { id: this.nextId(), type: 'mine', params: { blockName, count: 16, chestPos: chestPos ?? undefined } };
       }
 
-      case 'hauler':
+      case 'hauler': {
+        const hasItems = rec.inventory.reduce((s, i) => s + i.count, 0) > 0;
+        if (!hasItems) return this.idle(10_000);
         if (!chestPos) return this.idle(5_000);
         return { id: this.nextId(), type: 'deposit', params: { chestPos } };
+      }
 
       case 'farmer':
         return { id: this.nextId(), type: 'farm', params: { centerX: 0, centerZ: 0, radius: 16 } };

@@ -163,18 +163,24 @@ export class MiningBehavior {
 
   // ─── Public API ────────────────────────────────────────────────────────────
 
-  async collect(domainBot: Bot, blockName: string, count: number, onFull?: DepositFn, scaffold = false): Promise<void> {
+  async collect(domainBot: Bot, blockName: string | string[], count: number, onFull?: DepositFn, scaffold = false): Promise<void> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mcData = require('minecraft-data')(mfBot.version);
-    const blockType = mcData.blocksByName[blockName];
-    if (!blockType) {
-      console.warn(`[Mining] ${domainBot.username}: unknown block "${blockName}"`);
-      return;
-    }
 
+    // Resolve one or many block names to a set of type IDs
+    const names = Array.isArray(blockName) ? blockName : [blockName];
+    const typeIdToName = new Map<number, string>();
+    for (const name of names) {
+      const bt = mcData.blocksByName[name];
+      if (bt) typeIdToName.set(bt.id, name);
+      else console.warn(`[Mining] ${domainBot.username}: unknown block "${name}"`);
+    }
+    if (typeIdToName.size === 0) return;
+
+    const label = names.length === 1 ? names[0] : `[${names.slice(0,3).join('|')}${names.length > 3 ? '…' : ''}]`;
     const movementsFn = scaffold ? createScaffoldMovements : createMovements;
 
     domainBot.setState(BotState.MOVING);
@@ -188,22 +194,23 @@ export class MiningBehavior {
         mfBot.pathfinder.setMovements(movementsFn(mfBot));
       }
 
+      // Find nearest block matching ANY of the requested types
       const block = mfBot.findBlock({
-        matching: b => b.type === blockType.id
-          && !isBlockUnderwater(mfBot, b.position),
+        matching: b => typeIdToName.has(b.type) && !isBlockUnderwater(mfBot, b.position),
         maxDistance: 128,
       });
       if (!block) {
         const pos = mfBot.entity?.position;
         const posStr = pos ? `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}` : '?';
-        const rawBlock = mfBot.findBlock({ matching: b => b.name.includes('log'), maxDistance: 128 });
-        console.warn(`[Mining] ${domainBot.username}: no "${blockName}" in range (pos=${posStr}, anyLog=${rawBlock?.name ?? 'none'}@${rawBlock ? `${Math.floor(rawBlock.position.x)},${Math.floor(rawBlock.position.y)},${Math.floor(rawBlock.position.z)}` : '?'})`);
+        console.warn(`[Mining] ${domainBot.username}: no ${label} in range (pos=${posStr})`);
         break;
       }
-      const mined = await this.safeDig(mfBot, block.position, blockName, mcData);
+
+      const foundName = typeIdToName.get(block.type)!;
+      const mined = await this.safeDig(mfBot, block.position, foundName, mcData);
       if (mined) {
         collected++;
-        console.log(`[Mining] ${domainBot.username}: ${blockName} ${collected}/${count}`);
+        console.log(`[Mining] ${domainBot.username}: ${foundName} ${collected}/${count}`);
         await escapeWaterIfNeeded(mfBot, domainBot.username);
         mfBot.pathfinder.setMovements(movementsFn(mfBot));
       }
@@ -211,8 +218,6 @@ export class MiningBehavior {
 
     await escapeWaterIfNeeded(mfBot, domainBot.username);
 
-    // Always deposit after a collect run if a chest is configured, even if
-    // we collected fewer blocks than requested (ran out of accessible blocks).
     if (collected > 0 && onFull) {
       console.log(`[Mining] ${domainBot.username}: collect done (${collected}/${count}) — depositing`);
       await onFull(domainBot);
@@ -221,7 +226,7 @@ export class MiningBehavior {
     domainBot.setState(BotState.CONNECTED);
 
     if (collected === 0) {
-      throw new Error(`No accessible "${blockName}" found within range`);
+      throw new Error(`No accessible ${label} found within range`);
     }
   }
 

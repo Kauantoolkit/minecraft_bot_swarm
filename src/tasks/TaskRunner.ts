@@ -105,16 +105,9 @@ export class TaskRunner {
           break;
         }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
-        for (const wood of WOOD_TYPES) {
-          this.checkCancelled();
-          try {
-            await this.adapter.collect(this.bot, wood, count - woodInInventory, onFull, true); // scaffold=true
-            return; // success
-          } catch {
-            // try next wood type
-          }
-        }
-        throw new Error('No wood found nearby');
+        // Pass all wood types at once — MiningBehavior picks the nearest available
+        await this.adapter.collect(this.bot, WOOD_TYPES, count - woodInInventory, onFull, true);
+        break;
       }
 
       // ── Deposit all ────────────────────────────────────────────────────────
@@ -225,17 +218,9 @@ export class TaskRunner {
     const toCollect = needed - currentLogs;
     console.log(`[TaskRunner] ${this.bot.username}: need ${toCollect} more logs`);
 
-    // Try each wood type until we have enough
-    for (const wood of WOOD_TYPES) {
-      this.checkCancelled();
-      try {
-        await this.adapter.collect(this.bot, wood, toCollect);
-        return;
-      } catch {
-        // try next type
-      }
-    }
-    throw new Error('Could not find any wood logs nearby');
+    // Pass all types at once — picks nearest available
+    await this.adapter.collect(this.bot, WOOD_TYPES, toCollect);
+
   }
 
   private async craftPlanks(needed: number): Promise<void> {

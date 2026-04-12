@@ -115,6 +115,15 @@ async function boot(): Promise<void> {
       send({ type: 'CHAT_MSG', username, message });
     });
 
+    // Notify main thread on disconnect so Orchestrator stops assigning tasks
+    const onDisconnect = (reason: string) => {
+      tasks.cancel();
+      send({ type: 'DISCONNECTED', reason });
+    };
+    mfBot.on('end',    (reason: string) => onDisconnect(reason));
+    mfBot.on('kicked', (reason: string) => onDisconnect(`kicked: ${reason}`));
+    mfBot.on('error',  (err: Error)     => onDisconnect(err.message));
+
     send({ type: 'READY' });
 
     // Periodic state push (~1 Hz)
