@@ -206,10 +206,10 @@ export class Orchestrator {
           return { id: this.nextId(), type: 'deposit', params: { chestPos } };
         }
         if (phase === 'bootstrap') {
-          return { id: this.nextId(), type: 'collect_wood', params: { count: 32, chestPos: chestPos ?? undefined } };
+          return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: chestPos ?? undefined } };
         }
         const blockName = mineTargetForPhase(phase);
-        return { id: this.nextId(), type: 'mine', params: { blockName, count: 32, chestPos: chestPos ?? undefined } };
+        return { id: this.nextId(), type: 'mine', params: { blockName, count: 16, chestPos: chestPos ?? undefined } };
       }
 
       case 'hauler':

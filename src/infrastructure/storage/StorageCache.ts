@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Vec3 } from 'vec3';
+import { instanceDataDir } from '../../config';
 
 interface StorageEntry {
   label: string;
@@ -9,7 +10,7 @@ interface StorageEntry {
   z: number;
 }
 
-const PERSIST_FILE = path.resolve(process.cwd(), 'storages.json');
+const PERSIST_FILE = path.join(instanceDataDir, 'storages.json');
 
 /**
  * Registry of known storage containers (chests, barrels, etc.).

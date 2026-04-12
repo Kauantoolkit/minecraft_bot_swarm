@@ -1,1 +1,0 @@
-{"version":3,"file":"ProxyLoader.d.ts","sourceRoot":"","sources":["../../../src/infrastructure/network/ProxyLoader.ts"],"names":[],"mappings":"AACA,OAAO,EAAE,WAAW,EAAkB,MAAM,wCAAwC,CAAC;AAErF,qBAAa,WAAW;IACtB,OAAO,CAAC,OAAO,CAAqB;IACpC,OAAO,CAAC,MAAM,CAAK;IAEnB,IAAI,CAAC,QAAQ,EAAE,MAAM,GAAG,IAAI;IAY5B,IAAI,IAAI,WAAW,GAAG,SAAS;IAO/B,UAAU,IAAI,OAAO;IAIrB,KAAK,IAAI,MAAM;CAGhB"}

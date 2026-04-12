@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { instanceDataDir } from '../../config';
 
 export type Relationship = 'friend' | 'enemy' | 'neutral';
 
@@ -13,7 +14,7 @@ export type NeutralBehavior = 'ignore' | 'attack' | 'armed';
 
 const WEAPON_SUBSTRINGS = ['sword', 'axe', 'bow', 'crossbow', 'trident', 'mace'];
 
-const SAVE_FILE = path.resolve(process.cwd(), 'relationships.json');
+const SAVE_FILE = path.join(instanceDataDir, 'relationships.json');
 
 interface SaveData {
   friends: string[];

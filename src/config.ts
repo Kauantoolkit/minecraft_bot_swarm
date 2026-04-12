@@ -1,5 +1,6 @@
 import path from 'path';
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -34,3 +35,11 @@ export const config = {
     port: parseInt(requireEnv('WEB_PORT', '3000'), 10),
   },
 } as const;
+
+/** Directory where all instance-specific data is persisted (storages, groups, relationships).
+ *  Set MC_INSTANCE in .env to isolate data per world (e.g. MC_INSTANCE=survival).
+ *  Falls back to host_port if not set. */
+const instanceKey = process.env.MC_INSTANCE?.trim() || `${config.server.host}_${config.server.port}`;
+export const instanceDataDir = path.resolve(process.cwd(), 'data', instanceKey);
+
+fs.mkdirSync(instanceDataDir, { recursive: true });

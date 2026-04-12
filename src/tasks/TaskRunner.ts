@@ -82,6 +82,12 @@ export class TaskRunner {
       case 'mine': {
         this.checkCancelled();
         const { blockName, count, chestPos } = d.params;
+        // If already carrying enough, skip mining and deposit directly
+        if (chestPos && this.countInInventory(blockName) >= count) {
+          console.log(`[TaskRunner] ${this.bot.username}: already has ${count}x ${blockName}, depositing`);
+          await this.adapter.depositAll(this.bot, toVec3(chestPos));
+          break;
+        }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
         await this.adapter.collect(this.bot, blockName, count, onFull);
         break;
@@ -91,11 +97,18 @@ export class TaskRunner {
       case 'collect_wood': {
         this.checkCancelled();
         const { count, chestPos } = d.params;
+        // If already carrying enough wood of any type, skip and deposit
+        const woodInInventory = WOOD_TYPES.reduce((sum, w) => sum + this.countInInventory(w), 0);
+        if (chestPos && woodInInventory >= count) {
+          console.log(`[TaskRunner] ${this.bot.username}: already has ${woodInInventory} logs, depositing`);
+          await this.adapter.depositAll(this.bot, toVec3(chestPos));
+          break;
+        }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
         for (const wood of WOOD_TYPES) {
           this.checkCancelled();
           try {
-            await this.adapter.collect(this.bot, wood, count, onFull, true); // scaffold=true
+            await this.adapter.collect(this.bot, wood, count - woodInInventory, onFull, true); // scaffold=true
             return; // success
           } catch {
             // try next wood type
@@ -257,6 +270,14 @@ export class TaskRunner {
         await this.adapter.depositAll(this.bot, toVec3(chestPos));
       }
     };
+  }
+
+  private countInInventory(itemName: string): number {
+    const mfBot = this.bot.handle as { inventory: { items(): Array<{ name: string; count: number }> } } | null;
+    if (!mfBot) return 0;
+    return mfBot.inventory.items()
+      .filter(i => i.name === itemName)
+      .reduce((sum, i) => sum + i.count, 0);
   }
 }
 

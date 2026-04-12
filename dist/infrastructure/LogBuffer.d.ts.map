@@ -1,1 +1,0 @@
-{"version":3,"file":"LogBuffer.d.ts","sourceRoot":"","sources":["../../src/infrastructure/LogBuffer.ts"],"names":[],"mappings":"AAAA;;;;GAIG;AAEH,MAAM,WAAW,QAAQ;IACvB,KAAK,EAAE,MAAM,GAAG,MAAM,GAAG,OAAO,CAAC;IACjC,IAAI,EAAE,MAAM,CAAC;IACb,IAAI,EAAE,MAAM,CAAC;CACd;AAaD,wBAAgB,OAAO,IAAI,IAAI,CAU9B;AAED,wDAAwD;AACxD,wBAAgB,MAAM,CAAC,CAAC,SAAM,GAAG,QAAQ,EAAE,CAE1C"}

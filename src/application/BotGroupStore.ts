@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { instanceDataDir } from '../config';
 
-const SAVE_FILE = path.resolve(process.cwd(), 'groups.json');
+const SAVE_FILE = path.join(instanceDataDir, 'groups.json');
 
 /**
  * Manages named bot groups.
