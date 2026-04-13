@@ -13,6 +13,11 @@ export function isInventoryFull(mfBot: MineflayerBot): boolean {
   return empty < INVENTORY_FULL_THRESHOLD;
 }
 
+export function getEmptySlots(mfBot: MineflayerBot): number {
+  return (mfBot.inventory as unknown as { emptySlotCount(): number }).emptySlotCount?.() ?? 0;
+}
+
+
 const CHEST_BLOCK_NAMES = ['chest', 'trapped_chest', 'barrel', 'shulker_box',
   'white_shulker_box', 'orange_shulker_box', 'magenta_shulker_box', 'light_blue_shulker_box',
   'yellow_shulker_box', 'lime_shulker_box', 'pink_shulker_box', 'gray_shulker_box',
@@ -62,70 +67,170 @@ export class StorageBehavior {
 
 
   /**
-   * Navigate to a chest/barrel and deposit ALL items from the bot's inventory.
-   * Skips tools (anything with durability) to avoid depositing equipped gear.
+   * Navigate to chest and deposit. Tenta até 3 baús mais próximos se primeiro cheio.
+   * Para se inv esvaziou OU sem progresso.
    */
   async depositAll(domainBot: Bot, chestPos: Vec3): Promise<void> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
 
-    const chestBlock = mfBot.blockAt(chestPos);
-    if (!chestBlock) {
-      console.warn(`[Storage] ${domainBot.username}: no block at chest pos (${chestPos.x},${chestPos.y},${chestPos.z})`);
+  const initialEmpty = getEmptySlots(mfBot);
+
+    console.log(`[Storage] ${domainBot.username}: depositAll (initial empty: ${initialEmpty})`);
+
+    // Lista baús ordenados por distância
+    const botPos = mfBot.entity.position;
+    const mcData = require('minecraft-data')(mfBot.version);
+    const chests = await this.findChests(mfBot, botPos, mcData, 64);
+    if (chests.length === 0) {
+      console.warn(`[Storage] ${domainBot.username}: no chests found — skip`);
       return;
     }
 
-    // Navigate adjacent to the chest
-    mfBot.pathfinder.setMovements(createMovements(mfBot));
-    await new Promise<void>((res) => {
-      mfBot.pathfinder.setGoal(new goals.GoalNear(chestPos.x, chestPos.y, chestPos.z, 3));
-      mfBot.once('goal_reached', res);
-      setTimeout(res, 15000);
-    });
+    let attempts = 0;
+    const MAX_ATTEMPTS = chests.length;
 
-    // Re-fetch block after moving (chunk may have loaded)
-    const block = mfBot.blockAt(chestPos);
-    if (!block) {
-      throw new Error(`chest block not loaded after navigation at (${chestPos.x},${chestPos.y},${chestPos.z})`);
-    }
+    for (const tryChestPos of chests) {
+      attempts++;
+      console.log(`[Storage] ${domainBot.username}: tentativa ${attempts}/${MAX_ATTEMPTS} → ${tryChestPos.x}|${tryChestPos.y}|${tryChestPos.z}`);
 
-    // Verify the block is actually a container before trying to open it.
-    // openChest throws "containerToOpen is neither a block nor an entity" for non-containers.
-    if (!CHEST_BLOCK_NAMES.includes(block.name)) {
-      throw new Error(`block at (${chestPos.x},${chestPos.y},${chestPos.z}) is "${block.name}", not a chest`);
-    }
+  const emptyBefore = getEmptySlots(mfBot);
 
-    type ChestWindow = { items(): Array<{ type: number; count: number; metadata: number; nbt?: { value?: { Damage?: { value?: number } } } }>; deposit(type: number, meta: number | null, count: number): Promise<void>; close(): void };
-    let chest: ChestWindow | null = null;
-    try {
-      chest = await (mfBot as unknown as { openChest(b: unknown): Promise<ChestWindow> }).openChest(block);
-      if (!chest) return;
+      try {
+        await this.depositToChest(domainBot, tryChestPos);
+  const emptyAfter = getEmptySlots(mfBot);
 
-      const items = mfBot.inventory.items() as Array<{ type: number; count: number; metadata: number; nbt?: { value?: { Damage?: { value?: number } } } } >;
-
-      for (const item of items) {
-        // Skip items with durability (tools, weapons, armor) to avoid depositing gear
-        const hasDurability = (item.nbt?.value?.Damage?.value ?? 0) > 0;
-        if (hasDurability) continue;
-
-        try {
-          await chest.deposit(item.type, item.metadata ?? null, item.count);
-        } catch {
-          // Item may have already been moved or slot changed — skip
+        if (emptyAfter > emptyBefore) {
+          console.log(`[Storage] ${domainBot.username}: ✅ depositado (${emptyBefore}→${emptyAfter} empty slots)`);
+          // Verifica se ainda há itens depositáveis (ignora ferramentas duráveis)
+          const remaining = mfBot.inventory.items().filter(
+            (i: any) => (i.nbt?.value as any)?.Damage === undefined,
+          );
+          if (remaining.length === 0) return; // Tudo depositado
+          // Ainda há itens — tenta próximo baú
+        } else {
+          console.warn(`[Storage] ${domainBot.username}: ⚠️ baú cheio (no change ${emptyBefore}→${emptyAfter}) — próximo`);
         }
+      } catch (err: any) {
+        console.warn(`[Storage] ${domainBot.username}: ❌ tentativa ${attempts} falhou (${err.message}) — próximo`);
       }
+    }
+    const finalEmpty = getEmptySlots(mfBot);
 
-      console.log(`[Storage] ${domainBot.username}: deposited inventory → (${chestPos.x},${chestPos.y},${chestPos.z})`);
-    } finally {
-      chest?.close();
+    console.error(`[Storage] ${domainBot.username}: falhou esvaziar (${initialEmpty}→${finalEmpty} empty slots)`);
+    if (finalEmpty === initialEmpty) {
+      // Nenhum item foi depositado — todos os baús estão cheios ou inválidos
+      throw new Error(`Todos os baús cheios ou inválidos — nada depositado (${initialEmpty} slots livres)`);
     }
   }
 
+
+  private async findChests(mfBot: MineflayerBot, botPos: Vec3, mcData: any, radius: number): Promise<Vec3[]> {
+    // Primary: scan the actual world for chest blocks within radius
+    const validIds = new Set<number>(
+      CHEST_BLOCK_NAMES.map(n => (mcData.blocksByName[n] as { id: number } | undefined)?.id)
+        .filter((id): id is number => id !== undefined),
+    );
+    const worldFound: Vec3[] = (mfBot as any).findBlocks({
+      matching: (b: { type: number }) => validIds.has(b.type),
+      maxDistance: radius,
+      count: 64,
+    }).map((v: Vec3) => new Vec3(v.x, v.y, v.z));
+
+    // Secondary: registered storages (may be outside scan radius or in unloaded chunks).
+    // Verify each registered entry against the world — auto-remove invalid ones.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const nodePath = require('path') as typeof import('path');
+    const instanceKey = process.env.MC_INSTANCE?.trim() ||
+      `${process.env.MC_HOST ?? 'localhost'}_${process.env.MC_PORT ?? '25565'}`;
+    const STORAGE_PATH = nodePath.join(process.cwd(), 'data', instanceKey, 'storages.json');
+
+    const result = new Map<string, Vec3>(
+      worldFound.map(v => [`${v.x},${v.y},${v.z}`, v]),
+    );
+
+    try {
+      const storagesData: Array<{ label: string; x: number; y: number; z: number }> =
+        JSON.parse(fs.readFileSync(STORAGE_PATH, 'utf8'));
+      let changed = false;
+      const kept: typeof storagesData = [];
+
+      for (const entry of storagesData) {
+        const pos = new Vec3(entry.x, entry.y, entry.z);
+        const dist = botPos.distanceTo(pos);
+
+        if (dist <= radius) {
+          // Within scan radius — ground-truth check
+          const block = mfBot.blockAt(pos);
+          if (block && CHEST_BLOCK_NAMES.includes(block.name)) {
+            result.set(`${entry.x},${entry.y},${entry.z}`, pos); // include even if scan missed it
+            kept.push(entry);
+          } else {
+            console.warn(`[Storage] Entrada inválida removida: (${entry.x}, ${entry.y}, ${entry.z}) — bloco="${block?.name ?? 'null'}"`);
+            changed = true;
+          }
+        } else {
+          // Outside scan radius — keep without verifying
+          kept.push(entry);
+          result.set(`${entry.x},${entry.y},${entry.z}`, pos);
+        }
+      }
+
+      if (changed) {
+        fs.writeFileSync(STORAGE_PATH, JSON.stringify(kept, null, 2));
+      }
+    } catch {
+      // storages.json ausente ou corrompido — usa só o resultado do scan
+    }
+
+    const chests = Array.from(result.values());
+    console.log(`[Storage] ${chests.length} baú(s) encontrado(s) dentro de r=${radius}`);
+    return chests.sort((a, b) => botPos.distanceTo(a) - botPos.distanceTo(b));
+  }
+
+
+
+
+  private async depositToChest(domainBot: Bot, chestPos: Vec3): Promise<void> {
+    const mfBot = domainBot.handle as MineflayerBot | null;
+    if (!mfBot) throw new Error('No bot');
+
+    const block = mfBot.blockAt(chestPos);
+    if (!block || !CHEST_BLOCK_NAMES.includes(block.name)) {
+      throw new Error(`Invalid chest at ${chestPos}`);
+    }
+
+    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    await new Promise((res, rej) => {
+      mfBot.pathfinder.setGoal(new goals.GoalNear(chestPos.x, chestPos.y, chestPos.z, 3));
+      mfBot.once('goal_reached', res);
+      setTimeout(() => rej(new Error('timeout')), 15000);
+    });
+
+    type ChestWindow = { items(): any[]; deposit(type: number, meta: number | null, count: number): Promise<void>; close(): void };
+    const chest = await (mfBot as any).openChest(block);
+    try {
+      const items = mfBot.inventory.items();
+      for (const item of items) {
+        // Pula itens duráveis (ferramentas, armadura, armas) — qualquer item com Damage NBT
+        if ((item.nbt?.value as any)?.Damage !== undefined) continue;
+
+        await chest.deposit(item.type, item.metadata ?? null, item.count).catch(() => {});
+      }
+    } finally {
+      chest.close();
+    }
+  }
+
+
   /**
-   * Navigate to a chest and withdraw a specific item by name.
+   * Procura `itemName` em todos os baús próximos e retira até `count` unidades.
+   * Varre os baús por ordem de distância até obter a quantidade solicitada.
    * Returns the number of items actually withdrawn.
    */
-  async withdraw(domainBot: Bot, chestPos: Vec3, itemName: string, count: number): Promise<number> {
+  async withdraw(domainBot: Bot, _chestPos: Vec3, itemName: string, count: number): Promise<number> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return 0;
 
@@ -133,46 +238,68 @@ export class StorageBehavior {
     const mcData = require('minecraft-data')(mfBot.version);
     const itemDef = mcData.itemsByName[itemName] ?? mcData.blocksByName[itemName];
     if (!itemDef) {
-      console.warn(`[Storage] ${domainBot.username}: unknown item "${itemName}"`);
+      console.warn(`[Storage] ${domainBot.username}: item desconhecido "${itemName}"`);
       return 0;
     }
 
-    const block = mfBot.blockAt(chestPos);
-    if (!block) return 0;
-
-    mfBot.pathfinder.setMovements(createMovements(mfBot));
-    await new Promise<void>((res) => {
-      mfBot.pathfinder.setGoal(new goals.GoalNear(chestPos.x, chestPos.y, chestPos.z, 3));
-      mfBot.once('goal_reached', res);
-      setTimeout(res, 15000);
-    });
-
-    const freshBlock = mfBot.blockAt(chestPos);
-    if (!freshBlock) return 0;
-
-    type Chest = { items(): Array<{ type: number; count: number; metadata: number }>; withdraw(type: number, meta: number | null, count: number): Promise<void>; close(): void };
-    let chest: Chest | null = null;
-    let withdrawn = 0;
-    try {
-      chest = await (mfBot as unknown as { openChest(b: unknown): Promise<Chest> }).openChest(freshBlock);
-      if (!chest) return 0;
-
-      const chestItems = chest.items().filter(i => i.type === itemDef.id);
-      const available = chestItems.reduce((sum, i) => sum + i.count, 0);
-      const toWithdraw = Math.min(count, available);
-      if (toWithdraw === 0) {
-        console.warn(`[Storage] ${domainBot.username}: "${itemName}" not in chest`);
-        return 0;
-      }
-
-      await chest.withdraw(itemDef.id, null, toWithdraw);
-      withdrawn = toWithdraw;
-      console.log(`[Storage] ${domainBot.username}: withdrew ${toWithdraw}x ${itemName}`);
-    } catch (err) {
-      console.warn(`[Storage] ${domainBot.username}: withdraw failed — ${err}`);
-    } finally {
-      chest?.close();
+    const botPos = mfBot.entity.position;
+    const chests = await this.findChests(mfBot, botPos, mcData, 64);
+    if (chests.length === 0) {
+      console.warn(`[Storage] ${domainBot.username}: nenhum baú encontrado para retirar "${itemName}"`);
+      return 0;
     }
-    return withdrawn;
+
+    type Chest = {
+      items(): Array<{ type: number; count: number; metadata: number }>;
+      withdraw(type: number, meta: number | null, count: number): Promise<void>;
+      close(): void;
+    };
+
+    let remaining = count;
+    let totalWithdrawn = 0;
+
+    for (const pos of chests) {
+      if (remaining <= 0) break;
+
+      const block = mfBot.blockAt(pos);
+      if (!block || !CHEST_BLOCK_NAMES.includes(block.name)) continue;
+
+      mfBot.pathfinder.setMovements(createMovements(mfBot));
+      await new Promise<void>(res => {
+        mfBot.pathfinder.setGoal(new goals.GoalNear(pos.x, pos.y, pos.z, 3));
+        mfBot.once('goal_reached', res);
+        setTimeout(res, 15_000);
+      });
+
+      const freshBlock = mfBot.blockAt(pos);
+      if (!freshBlock || !CHEST_BLOCK_NAMES.includes(freshBlock.name)) continue;
+
+      let chest: Chest | null = null;
+      try {
+        chest = await (mfBot as unknown as { openChest(b: unknown): Promise<Chest> }).openChest(freshBlock);
+        if (!chest) continue;
+
+        const available = chest.items()
+          .filter(i => i.type === itemDef.id)
+          .reduce((sum, i) => sum + i.count, 0);
+
+        if (available === 0) { chest.close(); chest = null; continue; }
+
+        const toWithdraw = Math.min(remaining, available);
+        await chest.withdraw(itemDef.id, null, toWithdraw);
+        totalWithdrawn += toWithdraw;
+        remaining -= toWithdraw;
+        console.log(`[Storage] ${domainBot.username}: retirou ${toWithdraw}x "${itemName}" de (${pos.x},${pos.y},${pos.z}) [total=${totalWithdrawn}/${count}]`);
+      } catch (err) {
+        console.warn(`[Storage] ${domainBot.username}: falha ao retirar de (${pos.x},${pos.y},${pos.z}): ${err}`);
+      } finally {
+        chest?.close();
+      }
+    }
+
+    if (totalWithdrawn === 0) {
+      console.warn(`[Storage] ${domainBot.username}: "${itemName}" não encontrado em nenhum baú`);
+    }
+    return totalWithdrawn;
   }
 }

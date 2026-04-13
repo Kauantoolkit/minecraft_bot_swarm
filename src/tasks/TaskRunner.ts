@@ -247,9 +247,10 @@ export class TaskRunner {
     for (const logStack of logs) {
       this.checkCancelled();
       const plankName = logStack.name.replace('_log', '_planks');
-      const planksToMake = needed - currentPlanks;
+      // mfBot.craft count = number of craft operations (not items). Each plank recipe yields 4 planks.
+      const craftOps = Math.ceil((needed - currentPlanks) / 4);
       try {
-        await this.adapter.craftItem(this.bot, plankName, planksToMake);
+        await this.adapter.craftItem(this.bot, plankName, craftOps);
         return;
       } catch {
         // wrong plank type, try next

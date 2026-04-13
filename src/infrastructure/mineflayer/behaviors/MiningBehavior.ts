@@ -303,7 +303,12 @@ export class MiningBehavior {
     while (collected < count) {
       if (onFull && isInventoryFull(mfBot)) {
         console.log(`[Mining] ${domainBot.username}: inventory full — depositing`);
-        await onFull(domainBot);
+        try {
+          await onFull(domainBot);
+        } catch (err) {
+          console.warn(`[Mining] ${domainBot.username}: depósito falhou, parando coleta: ${(err as Error).message}`);
+          break;
+        }
         mfBot.pathfinder.setMovements(movementsFn(mfBot));
       }
 
@@ -408,7 +413,12 @@ export class MiningBehavior {
     while (collected < count) {
       if (onFull && isInventoryFull(mfBot)) {
         console.log(`[Mining] ${domainBot.username}: inventory full — depositing`);
-        await onFull(domainBot);
+        try {
+          await onFull(domainBot);
+        } catch (err) {
+          console.warn(`[Mining] ${domainBot.username}: depósito falhou, parando coleta: ${(err as Error).message}`);
+          break;
+        }
         mfBot.pathfinder.setMovements(createMovements(mfBot));
       }
 
@@ -450,7 +460,12 @@ export class MiningBehavior {
     while (!queue.isEmpty()) {
       if (onFull && isInventoryFull(mfBot)) {
         console.log(`[Quarry] ${domainBot.username}: inventory full — depositing`);
-        await onFull(domainBot);
+        try {
+          await onFull(domainBot);
+        } catch (err) {
+          console.warn(`[Quarry] ${domainBot.username}: depósito falhou, parando quarry: ${(err as Error).message}`);
+          break;
+        }
         mfBot.pathfinder.setMovements(createMovements(mfBot));
       }
 

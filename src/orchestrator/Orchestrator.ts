@@ -221,8 +221,7 @@ export class Orchestrator {
       }
 
       case 'hauler': {
-        const hasItems = rec.inventory.reduce((s, i) => s + i.count, 0) > 0;
-        if (!hasItems) return this.idle(10_000);
+        if (!isInventoryFull(rec)) return this.idle(10_000);
         if (!chestPos) return this.idle(5_000);
         return { id: this.nextId(), type: 'deposit', params: { chestPos } };
       }
@@ -269,13 +268,15 @@ export class Orchestrator {
         // If has logs but not enough planks, convert them first
         if (logEntry) {
           const plankName = logEntry.name.replace('_log', '_planks');
-          return { id: this.nextId(), type: 'craft', params: { itemName: plankName, count: logEntry.count * 4 } };
+          // count = número de operações de craft (não de itens); 1 op = 1 log → 4 planks
+          return { id: this.nextId(), type: 'craft', params: { itemName: plankName, count: logEntry.count } };
         }
 
-        // No materials on hand — try to fetch planks/logs from storage
+        // Sem materiais em mãos — tenta retirar logs do baú, senão coleta direto
         if (chestPos) {
-          return { id: this.nextId(), type: 'withdraw', params: { chestPos, itemName: 'oak_planks', count: 32 } };
+          return { id: this.nextId(), type: 'withdraw', params: { chestPos, itemName: 'oak_log', count: 16 } };
         }
+        return { id: this.nextId(), type: 'collect_wood', params: { count: 16 } };
 
         // Nothing to do — guard the base
         return {
