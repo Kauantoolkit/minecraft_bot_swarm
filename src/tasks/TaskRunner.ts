@@ -82,14 +82,14 @@ export class TaskRunner {
       case 'mine': {
         this.checkCancelled();
         const { blockName, count, chestPos } = d.params;
-        // If already carrying enough, skip mining and deposit directly
-        if (chestPos && this.countInInventory(blockName) >= count) {
-          console.log(`[TaskRunner] ${this.bot.username}: already has ${count}x ${blockName}, depositing`);
-          await this.adapter.depositAll(this.bot, toVec3(chestPos));
+        // If already carrying enough, skip mining
+        if (this.countInInventory(blockName) >= count) {
+          console.log(`[TaskRunner] ${this.bot.username}: already has ${count}x ${blockName}`);
+          if (chestPos) await this.adapter.depositAll(this.bot, toVec3(chestPos));
           break;
         }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
-        await this.adapter.collect(this.bot, blockName, count, onFull);
+        await this.adapter.collect(this.bot, blockName, count - this.countInInventory(blockName), onFull);
         break;
       }
 
@@ -97,11 +97,11 @@ export class TaskRunner {
       case 'collect_wood': {
         this.checkCancelled();
         const { count, chestPos } = d.params;
-        // If already carrying enough wood of any type, skip and deposit
+        // If already carrying enough wood of any type, skip collection
         const woodInInventory = WOOD_TYPES.reduce((sum, w) => sum + this.countInInventory(w), 0);
-        if (chestPos && woodInInventory >= count) {
-          console.log(`[TaskRunner] ${this.bot.username}: already has ${woodInInventory} logs, depositing`);
-          await this.adapter.depositAll(this.bot, toVec3(chestPos));
+        if (woodInInventory >= count) {
+          console.log(`[TaskRunner] ${this.bot.username}: already has ${woodInInventory} logs`);
+          if (chestPos) await this.adapter.depositAll(this.bot, toVec3(chestPos));
           break;
         }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
@@ -153,6 +153,14 @@ export class TaskRunner {
       case 'craft': {
         this.checkCancelled();
         await this.adapter.craftItem(this.bot, d.params.itemName, d.params.count);
+        break;
+      }
+
+      // ── Withdraw from chest ─────────────────────────────────────────────────
+      case 'withdraw': {
+        this.checkCancelled();
+        const pos = toVec3(d.params.chestPos);
+        await this.adapter.withdraw(this.bot, pos, d.params.itemName, d.params.count);
         break;
       }
 

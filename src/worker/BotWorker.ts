@@ -236,6 +236,7 @@ port.on('message', async (msg: MainToWorkerMsg) => {
         .then(() => send({ type: 'TASK_COMPLETE', taskId: msg.descriptor.id }))
         .catch(err => {
           if ((err as Error).message !== 'cancelled') {
+            console.error(`[BotWorker] Task ${msg.descriptor.type} failed:\n${(err as Error).stack ?? String(err)}`);
             send({ type: 'TASK_FAILED', taskId: msg.descriptor.id, error: (err as Error).message, retryable: true });
           }
         });

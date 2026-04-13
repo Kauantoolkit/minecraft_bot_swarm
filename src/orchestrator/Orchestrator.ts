@@ -209,6 +209,11 @@ export class Orchestrator {
           return { id: this.nextId(), type: 'deposit', params: { chestPos } };
         }
         if (phase === 'bootstrap') {
+          const woodCount = rec.inventory
+            .filter(i => i.name.endsWith('_log'))
+            .reduce((s, i) => s + i.count, 0);
+          // Already have enough wood but nowhere to deposit — wait for builder to set up storage.
+          if (woodCount >= 16 && !chestPos) return this.idle(5_000);
           return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: chestPos ?? undefined } };
         }
         const blockName = mineTargetForPhase(phase);
@@ -244,11 +249,45 @@ export class Orchestrator {
             },
           };
         }
-        // Otherwise gather materials or deposit
+
+        // Deposit if carrying too much
         if (isInventoryFull(rec) && chestPos) {
           return { id: this.nextId(), type: 'deposit', params: { chestPos } };
         }
-        return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: chestPos ?? undefined } };
+
+        // Count craftable materials in inventory
+        const planks = rec.inventory
+          .filter(i => i.name.endsWith('_planks'))
+          .reduce((s, i) => s + i.count, 0);
+        const logEntry = rec.inventory.find(i => i.name.endsWith('_log'));
+
+        // If enough planks to craft at least one chest (8 planks each), craft them
+        if (planks >= 8) {
+          return { id: this.nextId(), type: 'craft', params: { itemName: 'chest', count: Math.floor(planks / 8) } };
+        }
+
+        // If has logs but not enough planks, convert them first
+        if (logEntry) {
+          const plankName = logEntry.name.replace('_log', '_planks');
+          return { id: this.nextId(), type: 'craft', params: { itemName: plankName, count: logEntry.count * 4 } };
+        }
+
+        // No materials on hand — try to fetch planks/logs from storage
+        if (chestPos) {
+          return { id: this.nextId(), type: 'withdraw', params: { chestPos, itemName: 'oak_planks', count: 32 } };
+        }
+
+        // Nothing to do — guard the base
+        return {
+          id: this.nextId(),
+          type: 'guard',
+          params: {
+            x: rec.position?.x ?? 0,
+            y: rec.position?.y ?? 64,
+            z: rec.position?.z ?? 0,
+            radius: 20,
+          },
+        };
       }
 
       default:

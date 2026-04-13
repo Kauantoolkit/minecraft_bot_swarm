@@ -52,6 +52,7 @@ export type TaskDescriptor =
   | { id: string; type: 'farm';         params: { centerX: number; centerZ: number; radius: number } }
   | { id: string; type: 'explore';      params: { direction: 'north' | 'south' | 'east' | 'west' | 'auto' } }
   | { id: string; type: 'craft';         params: { itemName: string; count: number } }
+  | { id: string; type: 'withdraw';      params: { chestPos: SerializedVec3; itemName: string; count: number } }
   | { id: string; type: 'build_storage'; params: {
       storageLabel: string;
       centerX: number; centerY: number; centerZ: number;

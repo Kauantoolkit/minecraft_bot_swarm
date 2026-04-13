@@ -19,7 +19,8 @@ async function escapeWaterIfNeeded(mfBot: MineflayerBot, username: string): Prom
   const inWater = (mfBot.entity as unknown as { isInWater?: boolean }).isInWater;
   if (!inWater) return;
   console.warn(`[Mining] ${username}: in water after dig — escaping`);
-  const pos = mfBot.entity.position;
+  const pos = mfBot.entity?.position;
+  if (!pos) return;
   mfBot.pathfinder.setMovements(createMovements(mfBot));
   await new Promise<void>(res => {
     const onReach = () => { clearTimeout(timer); res(); };
@@ -151,7 +152,11 @@ export class MiningBehavior {
 
   /**
    * Navigate to a block, stop pathfinder, then dig with a fresh reference.
-   * Returns true if the block was successfully mined, false if already gone or unreachable.
+   * Returns:
+   *   'mined'       — block successfully broken
+   *   'gone'        — block disappeared or changed before/during dig
+   *   'unreachable' — bot could not get within reach after navigation
+   *   'failed'      — dig was attempted but rejected by the server
    */
   private async safeDig(
     domainBot: Bot,
@@ -159,7 +164,7 @@ export class MiningBehavior {
     pos: Vec3,
     expectedName: string,
     mcData: ReturnType<typeof require>,
-  ): Promise<boolean> {
+  ): Promise<'mined' | 'gone' | 'unreachable' | 'failed'> {
     await new Promise<void>((res) => {
       const onReach = () => { clearTimeout(timer); res(); };
       const timer = setTimeout(() => { mfBot.off('goal_reached', onReach); res(); }, 8000);
@@ -170,24 +175,29 @@ export class MiningBehavior {
     const block = mfBot.blockAt(pos);
     if (!block || block.name !== expectedName) {
       console.warn(`[safeDig] ${domainBot.username}: block gone or changed after nav (expected ${expectedName})`);
-      return false;
+      return 'gone';
     }
-    const dist = block.position.distanceTo(mfBot.entity.position);
+    const entityPos = mfBot.entity?.position;
+    if (!entityPos) {
+      console.warn(`[safeDig] ${domainBot.username}: entity position unavailable — deferring`);
+      return 'unreachable';
+    }
+    const dist = block.position.distanceTo(entityPos);
     if (dist > 5) {
-      console.warn(`[safeDig] ${domainBot.username}: too far after nav (${dist.toFixed(1)}m) for ${expectedName}`);
-      return false;
+      console.warn(`[safeDig] ${domainBot.username}: too far after nav (${dist.toFixed(1)}m) for ${expectedName} — marking unreachable`);
+      return 'unreachable';
     }
 
     await this.autoEquipToolFor(mfBot, block, mcData);
 
     // Re-fetch block after possible tool equip delay
     const freshBlock = mfBot.blockAt(pos);
-    if (!freshBlock || freshBlock.name !== expectedName) return false;
+    if (!freshBlock || freshBlock.name !== expectedName) return 'gone';
 
     const canDig = mfBot.canDigBlock(freshBlock);
     const heldItem = (mfBot.heldItem as { name?: string } | null)?.name ?? 'hand';
     console.log(`[safeDig] ${domainBot.username}: ${expectedName} canDig=${canDig} held=${heldItem} onGround=${mfBot.entity.onGround}`);
-    if (!canDig) return false;
+    if (!canDig) return 'failed';
 
     const botMeta = this.meta.get(domainBot);
     // Set the flag BEFORE stopping pathfinder — DefendBehavior checks this
@@ -247,13 +257,13 @@ export class MiningBehavior {
     };
 
     try {
-      if (await tryDig(freshBlock)) return true;
+      if (await tryDig(freshBlock)) return 'mined';
 
       // One retry — bot stays in place
       await new Promise(r => setTimeout(r, 300));
       const retry = mfBot.blockAt(pos);
-      if (!retry || retry.name !== expectedName || !mfBot.canDigBlock(retry)) return false;
-      return await tryDig(retry);
+      if (!retry || retry.name !== expectedName || !mfBot.canDigBlock(retry)) return 'failed';
+      return await tryDig(retry) ? 'mined' : 'failed';
     } finally {
       botMeta.digging = false;
     }
@@ -262,6 +272,7 @@ export class MiningBehavior {
   // ─── Public API ────────────────────────────────────────────────────────────
 
   async collect(domainBot: Bot, blockName: string | string[], count: number, onFull?: DepositFn, scaffold = false): Promise<void> {
+    if (count <= 0) return;
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
 
@@ -284,6 +295,10 @@ export class MiningBehavior {
     domainBot.setState(BotState.MOVING);
     mfBot.pathfinder.setMovements(movementsFn(mfBot));
 
+    // Positions that the bot could not reach during this collect session — skip them.
+    const unreachable = new Set<string>();
+    const posKey = (v: Vec3 | null | undefined): string => v ? `${v.x},${v.y},${v.z}` : '';
+
     let collected = 0;
     while (collected < count) {
       if (onFull && isInventoryFull(mfBot)) {
@@ -301,11 +316,15 @@ export class MiningBehavior {
             typeIdToName.has(b.type) &&
             !isBlockUnderwater(mfBot, b.position) &&
             isBlockAccessible(mfBot, b.position) &&
+            !unreachable.has(posKey(b.position)) &&
             Math.abs(b.position.y - botY) <= 4,
           maxDistance: 64,
         }) ??
         mfBot.findBlock({
-          matching: b => typeIdToName.has(b.type) && !isBlockUnderwater(mfBot, b.position),
+          matching: b =>
+            typeIdToName.has(b.type) &&
+            !isBlockUnderwater(mfBot, b.position) &&
+            !unreachable.has(posKey(b.position)),
           maxDistance: 128,
         });
       if (!block) {
@@ -316,12 +335,14 @@ export class MiningBehavior {
       }
 
       const foundName = typeIdToName.get(block.type)!;
-      const mined = await this.safeDig(domainBot, mfBot, block.position, foundName, mcData);
-      if (mined) {
+      const result = await this.safeDig(domainBot, mfBot, block.position, foundName, mcData);
+      if (result === 'mined') {
         collected++;
         console.log(`[Mining] ${domainBot.username}: ${foundName} ${collected}/${count}`);
         await escapeWaterIfNeeded(mfBot, domainBot.username);
         mfBot.pathfinder.setMovements(movementsFn(mfBot));
+      } else if (result === 'unreachable') {
+        unreachable.add(posKey(block.position));
       }
     }
 
@@ -357,9 +378,13 @@ export class MiningBehavior {
     let collected = 0;
     const veinQueue: Vec3[] = [];
 
+    const unreachable = new Set<string>();
+    const posKey = (v: Vec3 | null | undefined): string => v ? `${v.x},${v.y},${v.z}` : '';
+
     const tryDigAt = async (pos: Vec3): Promise<boolean> => {
-      const mined = await this.safeDig(domainBot, mfBot, pos, blockName, mcData);
-      if (!mined) return false;
+      const result = await this.safeDig(domainBot, mfBot, pos, blockName, mcData);
+      if (result === 'unreachable') { unreachable.add(posKey(pos)); return false; }
+      if (result !== 'mined') return false;
 
       collected++;
       console.log(`[Vein] ${domainBot.username}: ${blockName} ${collected}/${count}`);
@@ -393,8 +418,10 @@ export class MiningBehavior {
       if (collected >= count) break;
 
       const block = mfBot.findBlock({
-        matching: b => b.type === blockType.id
-          && !isBlockUnderwater(mfBot, b.position),
+        matching: b =>
+          b.type === blockType.id &&
+          !isBlockUnderwater(mfBot, b.position) &&
+          !unreachable.has(posKey(b.position)),
         maxDistance: 128,
       });
       if (!block) {
@@ -433,11 +460,15 @@ export class MiningBehavior {
       const block = mfBot.blockAt(pos);
       if (!block || block.name === 'air' || block.name === 'cave_air') continue;
 
-      const mined = await this.safeDig(domainBot, mfBot, pos, block.name, mcData);
-      if (mined) {
+      const result = await this.safeDig(domainBot, mfBot, pos, block.name, mcData);
+      if (result === 'mined') {
         queue.markDone();
         console.log(`[Quarry] ${domainBot.username}: mined [${queue.progress}]`);
         mfBot.pathfinder.setMovements(createMovements(mfBot));
+      } else if (result === 'unreachable') {
+        // Skip permanently unreachable positions rather than looping forever.
+        console.warn(`[Quarry] ${domainBot.username}: skipping unreachable pos ${pos.x},${pos.y},${pos.z}`);
+        queue.markDone();
       } else {
         queue.putBack(pos);
       }

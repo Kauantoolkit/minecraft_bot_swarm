@@ -100,10 +100,24 @@ export class CraftingBehavior {
     const below    = mfBot.blockAt(belowPos);
     if (!below) throw new Error('No solid block to place crafting table on');
 
-    await mfBot.placeBlock(below, new Vec3(0, 1, 0));
+    if (below.boundingBox !== 'block') throw new Error('Block below bot is not solid — cannot place crafting table');
+
+    // If the target position already has a crafting table (e.g. from a previous session), reuse it.
+    const alreadyThere = mfBot.blockAt(feetPos);
+    if (alreadyThere?.name === 'crafting_table') return alreadyThere;
+
+    try {
+      await mfBot.placeBlock(below, new Vec3(0, 1, 0));
+    } catch {
+      // placeBlock may time out even when placement succeeded (server lag or missed blockUpdate).
+      // Fall through and verify the block state directly.
+    }
+
+    // Give the server a moment to confirm the placement before reading world state.
+    await new Promise(r => setTimeout(r, 400));
 
     const placed = mfBot.blockAt(feetPos);
-    if (!placed) throw new Error('Crafting table was not placed');
+    if (!placed || placed.name !== 'crafting_table') throw new Error('Crafting table was not placed');
     return placed;
   }
 
