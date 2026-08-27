@@ -20,11 +20,11 @@ export class SwarmController implements ISwarmService {
   private readonly quarryQueue = new QuarryQueue();
   readonly intel     = new SwarmIntel();
   readonly relations = new PlayerRelationshipStore();
-  readonly storage   = new StorageCache();
 
   constructor(
     private readonly repository: IBotRepository,
     private readonly adapter: IBotAdapter,
+    readonly storage: StorageCache,
   ) {}
 
   /**
@@ -124,9 +124,10 @@ export class SwarmController implements ISwarmService {
 
   // ─── Resources ────────────────────────────────────────────────────────────
 
-  collectAll(blockName: string, count: number, storageLabel?: string, target?: BotTarget): void {
+  collectAll(blockName: string | string[], count: number, storageLabel?: string, target?: BotTarget): void {
     const bots = this.resolve(target);
-    this.log(`collect(${blockName} x${count}${storageLabel ? ` →${storageLabel}` : ''})`, bots);
+    const label = Array.isArray(blockName) ? blockName.join('|') : blockName;
+    this.log(`collect(${label} x${count}${storageLabel ? ` →${storageLabel}` : ''})`, bots);
     bots.forEach(bot => {
       const onFull = storageLabel ? this.makeDepositFn(storageLabel, bot) : undefined;
       this.adapter.collect(bot, blockName, count, onFull).catch(err =>
@@ -184,8 +185,7 @@ export class SwarmController implements ISwarmService {
 
   private resolveChestPos(label: string, bot: Bot): Vec3 | null {
     if (label === 'nearest') {
-      const mfBot = bot.handle as { entity?: { position?: Vec3 } } | null;
-      const botPos = mfBot?.entity?.position;
+      const botPos = this.adapter.getPosition(bot);
       if (!botPos) return null;
       return this.storage.getNearest(botPos)?.pos ?? null;
     }
@@ -194,10 +194,9 @@ export class SwarmController implements ISwarmService {
     return pos;
   }
 
-  private makeDepositFn(label: string, bot: Bot) {
+  private makeDepositFn(label: string, _bot: Bot) {
     return async (domainBot: Bot) => {
-      const mfBot = bot.handle as { entity?: { position?: Vec3 } } | null;
-      const botPos = mfBot?.entity?.position;
+      const botPos = this.adapter.getPosition(domainBot);
       const chestPos = label === 'nearest' && botPos
         ? this.storage.getNearest(botPos)?.pos
         : this.storage.getByLabel(label);

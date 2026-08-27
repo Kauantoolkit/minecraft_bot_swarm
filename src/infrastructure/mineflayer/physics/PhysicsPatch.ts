@@ -77,8 +77,11 @@ function buildMovements(mfBot: MineflayerBot, avoidWater: boolean, scaffold = fa
 
   if (scaffold) {
     // Allow the pathfinder to place blocks to climb up (like Baritone).
-    (movements as unknown as Record<string, unknown>)['canDig'] = true;
     (movements as unknown as Record<string, unknown>)['allow1by1towers'] = true;
+    // Disable pathfinder-driven digging in scaffold mode: the bot places blocks to
+    // climb but must not immediately dig them back, which would cause an infinite
+    // place-and-break loop. Explicit mfBot.dig() calls in MiningBehavior still work.
+    movements.canDig = false;
     const scaffoldIds: number[] = [];
     const inventoryItems = mfBot.inventory.items() as Array<{ type: number }>;
     for (const name of SCAFFOLDING_BLOCK_NAMES) {
@@ -89,6 +92,8 @@ function buildMovements(mfBot: MineflayerBot, avoidWater: boolean, scaffold = fa
       }
     }
     (movements as unknown as Record<string, unknown>)['scaffoldingBlocks'] = scaffoldIds;
+  } else {
+    (movements as unknown as Record<string, unknown>)['scaffoldingBlocks'] = [];
   }
 
   return movements;

@@ -3,6 +3,7 @@ import { IBotRepository } from '../../domain/repositories/IBotRepository';
 import { SwarmController } from '../../application/SwarmController';
 import { IBotAdapter } from '../mineflayer/IBotAdapter';
 import { recent as recentLogs } from '../LogBuffer';
+import { tracer } from '../Tracer';
 import type { Orchestrator } from '../../orchestrator/Orchestrator';
 import type { ColonyPhase } from '../../orchestrator/GlobalState';
 
@@ -57,6 +58,7 @@ export class WebServer {
 
     if (method === 'GET'  && url === '/api/status')           return this.apiStatus(res);
     if (method === 'GET'  && url?.startsWith('/api/log'))     return this.apiLog(res, url);
+    if (method === 'GET'  && url?.startsWith('/api/trace'))   return this.apiTrace(res, url);
     if (method === 'POST' && url === '/api/command')          return this.apiCommand(req, res);
     if (method === 'GET'  && url === '/api/orch')             return this.apiOrchGet(res);
     if (method === 'POST' && url === '/api/orch')             return this.apiOrchPost(req, res);
@@ -211,6 +213,23 @@ export class WebServer {
     const n = parseInt(new URL(url, 'http://x').searchParams.get('n') ?? '150', 10);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(recentLogs(n)));
+  }
+
+  private apiTrace(res: http.ServerResponse, url: string): void {
+    const params = new URL(url, 'http://x').searchParams;
+    const n = parseInt(params.get('n') ?? '100', 10);
+    const botId = params.get('botId') ?? undefined;
+    const mode = params.get('mode'); // 'failures' = show last failure context
+
+    let events;
+    if (mode === 'failures' && botId) {
+      events = tracer.failureContext(botId, n);
+    } else {
+      events = tracer.recent(n, botId);
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(events));
   }
 
   private serveUI(res: http.ServerResponse): void {
@@ -420,6 +439,19 @@ const HTML_PAGE = `<!DOCTYPE html>
   <button onclick="sendCmd()">Send</button>
 </div>
 <div id="cmd-log"></div>
+
+<h2>Trace (decision log)</h2>
+<div class="log-toolbar">
+  <label>Bot:
+    <select id="trace-bot" onchange="refreshTrace()">
+      <option value="">all</option>
+    </select>
+  </label>
+  <button class="btn-sm" onclick="showFailures()">Show last failure context</button>
+  <button class="btn-sm" onclick="refreshTrace()">Refresh</button>
+</div>
+<div id="trace-panel" style="background:#010409;border:1px solid #21262d;border-radius:6px;
+  padding:8px;height:280px;overflow-y:auto;font-size:11px;margin-bottom:12px"></div>
 
 <h2>Log</h2>
 <div class="log-toolbar">
@@ -690,7 +722,7 @@ function assignMine(uname) {
   sendRaw('@' + uname + ' collect ' + fBlock() + ' ' + fCount() + ' --store ' + fStore());
 }
 function assignWood(uname) {
-  sendRaw('@' + uname + ' collect oak_log ' + fCount() + ' --store ' + fStore());
+  sendRaw('@' + uname + ' collect wood ' + fCount() + ' --store ' + fStore());
 }
 function assignDeposit(uname) {
   sendRaw('@' + uname + ' store deposit ' + fStore());
@@ -784,6 +816,62 @@ function downloadLog() {
   a.click();
 }
 
+// ── Trace panel ───────────────────────────────────────────────────────────
+let traceData = [];
+
+function eventColor(ev) {
+  if (ev.includes('fail') || ev.includes('error')) return '#f85149';
+  if (ev.includes('assign') || ev.includes('start')) return '#58a6ff';
+  if (ev.includes('complete')) return '#3fb950';
+  if (ev.includes('step')) return '#e3b341';
+  return '#8b949e';
+}
+
+function renderTrace() {
+  const panel = document.getElementById('trace-panel');
+  if (traceData.length === 0) {
+    panel.innerHTML = '<span style="color:#6e7681">No trace events yet</span>';
+    return;
+  }
+  panel.innerHTML = traceData.map(e => {
+    const time = new Date(e.ts).toLocaleTimeString();
+    const ctxStr = Object.keys(e.ctx).length > 0
+      ? '<div style="color:#484f58;margin-left:20px;white-space:pre-wrap;max-height:80px;overflow:hidden;cursor:pointer" onclick="this.style.maxHeight=this.style.maxHeight===\\'none\\'?\\'80px\\':\\'none\\'">'
+        + esc(JSON.stringify(e.ctx, null, 1).slice(0, 600)) + '</div>'
+      : '';
+    return '<div style="margin-bottom:4px;border-left:2px solid ' + eventColor(e.event) + ';padding-left:6px">'
+      + '<span class="log-time">' + time + '</span> '
+      + '<span style="color:#58a6ff">[' + esc(e.bot) + ']</span> '
+      + '<span style="color:' + eventColor(e.event) + '">' + esc(e.event) + '</span> '
+      + '<span>' + esc(e.detail) + '</span>'
+      + ctxStr
+      + '</div>';
+  }).join('');
+  panel.scrollTop = panel.scrollHeight;
+}
+
+async function refreshTrace() {
+  const botId = document.getElementById('trace-bot').value;
+  const url = '/api/trace?n=100' + (botId ? '&botId=' + botId : '');
+  try { traceData = await fetch(url).then(r => r.json()); } catch {}
+  renderTrace();
+}
+
+async function showFailures() {
+  const botId = document.getElementById('trace-bot').value;
+  if (!botId) { alert('Select a bot first'); return; }
+  try { traceData = await fetch('/api/trace?mode=failures&n=30&botId=' + botId).then(r => r.json()); } catch {}
+  renderTrace();
+}
+
+function updateTraceBotSelect() {
+  const sel = document.getElementById('trace-bot');
+  const cur = sel.value;
+  const bots = orchData.bots || [];
+  sel.innerHTML = '<option value="">all</option>' +
+    bots.map(b => '<option value="' + b.id + '"' + (b.id === cur ? ' selected' : '') + '>' + esc(b.username) + '</option>').join('');
+}
+
 // ── Refresh loops ──────────────────────────────────────────────────────────
 async function refreshOrch() {
   try { orchData = await fetch('/api/orch').then(r => r.json()); } catch {}
@@ -798,7 +886,7 @@ async function refreshLog() {
 }
 
 async function tick() {
-  await Promise.all([refreshOrch(), refreshStatus(), refreshLog()]);
+  await Promise.all([refreshOrch(), refreshStatus(), refreshLog(), refreshTrace()]);
   renderColonyBar();
   renderBots();
   renderPanel();
@@ -806,6 +894,7 @@ async function tick() {
   renderStorages();
   renderIntel();
   renderLog();
+  updateTraceBotSelect();
   document.getElementById('refresh-ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 

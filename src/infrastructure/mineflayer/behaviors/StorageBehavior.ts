@@ -3,19 +3,9 @@ import { goals } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 import { Bot } from '../../../domain/entities/Bot';
 import { createMovements } from '../physics/PhysicsPatch';
+import { isInventoryFull, getEmptySlots } from '../utils';
 
-/** Minimum empty inventory slots before the bot considers itself "full". */
-export const INVENTORY_FULL_THRESHOLD = 5;
-
-export function isInventoryFull(mfBot: MineflayerBot): boolean {
-  // emptySlotCount covers the 36 main slots (hotbar + inventory)
-  const empty = (mfBot.inventory as unknown as { emptySlotCount(): number }).emptySlotCount?.() ?? 0;
-  return empty < INVENTORY_FULL_THRESHOLD;
-}
-
-export function getEmptySlots(mfBot: MineflayerBot): number {
-  return (mfBot.inventory as unknown as { emptySlotCount(): number }).emptySlotCount?.() ?? 0;
-}
+export { isInventoryFull, getEmptySlots };
 
 
 const CHEST_BLOCK_NAMES = ['chest', 'trapped_chest', 'barrel', 'shulker_box',
@@ -25,7 +15,13 @@ const CHEST_BLOCK_NAMES = ['chest', 'trapped_chest', 'barrel', 'shulker_box',
   'brown_shulker_box', 'green_shulker_box', 'red_shulker_box', 'black_shulker_box',
 ];
 
+/** TTL for the findChests result cache. Avoids repeated fs.readFileSync per deposit/withdraw. */
+const CHEST_CACHE_TTL_MS = 30_000;
+
 export class StorageBehavior {
+  /** In-worker cache: last known chest list + timestamp. Invalidated when TTL expires. */
+  private _chestCache: { chests: Vec3[]; ts: number } | null = null;
+
   /**
    * Navigate to (x, y, z) and scan the surrounding area for chest/barrel blocks.
    * Returns their positions so the caller can register them in StorageCache.
@@ -61,25 +57,28 @@ export class StorageBehavior {
       count: 256,
     });
 
+    // A scan is a reliable ground-truth refresh — bust the cache.
+    this._chestCache = null;
+
     console.log(`[Storage] ${domainBot.username}: found ${found.length} chest(s) within r=${radius} of (${x},${y},${z})`);
     return found.map((v: Vec3) => ({ x: v.x, y: v.y, z: v.z }));
   }
 
 
   /**
-   * Navigate to chest and deposit. Tenta até 3 baús mais próximos se primeiro cheio.
-   * Para se inv esvaziou OU sem progresso.
+   * Navigate to chest and deposit. Tries up to N nearest chests if first is full.
+   * Stops when inventory is empty or no progress is made.
    */
   async depositAll(domainBot: Bot, chestPos: Vec3): Promise<void> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return;
 
-  const initialEmpty = getEmptySlots(mfBot);
+    const initialEmpty = getEmptySlots(mfBot);
 
     console.log(`[Storage] ${domainBot.username}: depositAll (initial empty: ${initialEmpty})`);
 
-    // Lista baús ordenados por distância
     const botPos = mfBot.entity.position;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mcData = require('minecraft-data')(mfBot.version);
     const chests = await this.findChests(mfBot, botPos, mcData, 64);
     if (chests.length === 0) {
@@ -94,20 +93,19 @@ export class StorageBehavior {
       attempts++;
       console.log(`[Storage] ${domainBot.username}: tentativa ${attempts}/${MAX_ATTEMPTS} → ${tryChestPos.x}|${tryChestPos.y}|${tryChestPos.z}`);
 
-  const emptyBefore = getEmptySlots(mfBot);
+      const emptyBefore = getEmptySlots(mfBot);
 
       try {
         await this.depositToChest(domainBot, tryChestPos);
-  const emptyAfter = getEmptySlots(mfBot);
+        const emptyAfter = getEmptySlots(mfBot);
 
         if (emptyAfter > emptyBefore) {
           console.log(`[Storage] ${domainBot.username}: ✅ depositado (${emptyBefore}→${emptyAfter} empty slots)`);
-          // Verifica se ainda há itens depositáveis (ignora ferramentas duráveis)
           const remaining = mfBot.inventory.items().filter(
             (i: any) => (i.nbt?.value as any)?.Damage === undefined,
           );
-          if (remaining.length === 0) return; // Tudo depositado
-          // Ainda há itens — tenta próximo baú
+          if (remaining.length === 0) return;
+          // Still items left — try next chest
         } else {
           console.warn(`[Storage] ${domainBot.username}: ⚠️ baú cheio (no change ${emptyBefore}→${emptyAfter}) — próximo`);
         }
@@ -119,13 +117,26 @@ export class StorageBehavior {
 
     console.error(`[Storage] ${domainBot.username}: falhou esvaziar (${initialEmpty}→${finalEmpty} empty slots)`);
     if (finalEmpty === initialEmpty) {
-      // Nenhum item foi depositado — todos os baús estão cheios ou inválidos
       throw new Error(`Todos os baús cheios ou inválidos — nada depositado (${initialEmpty} slots livres)`);
     }
   }
 
 
+  /**
+   * Build the sorted chest list, using a TTL cache to avoid repeated fs.readFileSync
+   * calls within the same operation (e.g. withdraw looping over 8 wood types).
+   *
+   * Cache is busted whenever:
+   *   - TTL expires (30 s)
+   *   - scanNearbyChests is called (ground-truth refresh)
+   */
   private async findChests(mfBot: MineflayerBot, botPos: Vec3, mcData: any, radius: number): Promise<Vec3[]> {
+    const now = Date.now();
+    if (this._chestCache && now - this._chestCache.ts < CHEST_CACHE_TTL_MS) {
+      // Return cached list re-sorted for the bot's current position
+      return [...this._chestCache.chests].sort((a, b) => botPos.distanceTo(a) - botPos.distanceTo(b));
+    }
+
     // Primary: scan the actual world for chest blocks within radius
     const validIds = new Set<number>(
       CHEST_BLOCK_NAMES.map(n => (mcData.blocksByName[n] as { id: number } | undefined)?.id)
@@ -138,7 +149,6 @@ export class StorageBehavior {
     }).map((v: Vec3) => new Vec3(v.x, v.y, v.z));
 
     // Secondary: registered storages (may be outside scan radius or in unloaded chunks).
-    // Verify each registered entry against the world — auto-remove invalid ones.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -162,17 +172,15 @@ export class StorageBehavior {
         const dist = botPos.distanceTo(pos);
 
         if (dist <= radius) {
-          // Within scan radius — ground-truth check
           const block = mfBot.blockAt(pos);
           if (block && CHEST_BLOCK_NAMES.includes(block.name)) {
-            result.set(`${entry.x},${entry.y},${entry.z}`, pos); // include even if scan missed it
+            result.set(`${entry.x},${entry.y},${entry.z}`, pos);
             kept.push(entry);
           } else {
             console.warn(`[Storage] Entrada inválida removida: (${entry.x}, ${entry.y}, ${entry.z}) — bloco="${block?.name ?? 'null'}"`);
             changed = true;
           }
         } else {
-          // Outside scan radius — keep without verifying
           kept.push(entry);
           result.set(`${entry.x},${entry.y},${entry.z}`, pos);
         }
@@ -182,15 +190,17 @@ export class StorageBehavior {
         fs.writeFileSync(STORAGE_PATH, JSON.stringify(kept, null, 2));
       }
     } catch {
-      // storages.json ausente ou corrompido — usa só o resultado do scan
+      // storages.json absent or corrupt — use world scan only
     }
 
     const chests = Array.from(result.values());
     console.log(`[Storage] ${chests.length} baú(s) encontrado(s) dentro de r=${radius}`);
+
+    // Populate cache before sorting (sort is positional, cache stores canonical set)
+    this._chestCache = { chests, ts: now };
+
     return chests.sort((a, b) => botPos.distanceTo(a) - botPos.distanceTo(b));
   }
-
-
 
 
   private async depositToChest(domainBot: Bot, chestPos: Vec3): Promise<void> {
@@ -214,9 +224,7 @@ export class StorageBehavior {
     try {
       const items = mfBot.inventory.items();
       for (const item of items) {
-        // Pula itens duráveis (ferramentas, armadura, armas) — qualquer item com Damage NBT
         if ((item.nbt?.value as any)?.Damage !== undefined) continue;
-
         await chest.deposit(item.type, item.metadata ?? null, item.count).catch(() => {});
       }
     } finally {
@@ -226,11 +234,17 @@ export class StorageBehavior {
 
 
   /**
-   * Procura `itemName` em todos os baús próximos e retira até `count` unidades.
-   * Varre os baús por ordem de distância até obter a quantidade solicitada.
+   * Search for `itemName` across all nearby chests and withdraw up to `count` units.
+   *
+   * The `hintPos` parameter (previously ignored as `_chestPos`) is now used as a
+   * priority hint: the hinted chest is checked first before the full distance-sorted
+   * scan. This matters for the builder's withdrawLogs flow, where `hintPos` is the
+   * dedicated input chest that miners deposit to — checking it first avoids unnecessary
+   * navigation to other chests that won't have logs.
+   *
    * Returns the number of items actually withdrawn.
    */
-  async withdraw(domainBot: Bot, _chestPos: Vec3, itemName: string, count: number): Promise<number> {
+  async withdraw(domainBot: Bot, hintPos: Vec3, itemName: string, count: number): Promise<number> {
     const mfBot = domainBot.handle as MineflayerBot | null;
     if (!mfBot) return 0;
 
@@ -243,11 +257,18 @@ export class StorageBehavior {
     }
 
     const botPos = mfBot.entity.position;
-    const chests = await this.findChests(mfBot, botPos, mcData, 64);
-    if (chests.length === 0) {
+    const allChests = await this.findChests(mfBot, botPos, mcData, 64);
+    if (allChests.length === 0) {
       console.warn(`[Storage] ${domainBot.username}: nenhum baú encontrado para retirar "${itemName}"`);
       return 0;
     }
+
+    // Put hintPos first so callers that know the exact source chest skip unnecessary travel.
+    const hintKey = `${Math.floor(hintPos.x)},${Math.floor(hintPos.y)},${Math.floor(hintPos.z)}`;
+    const chests = [
+      ...allChests.filter(c => `${c.x},${c.y},${c.z}` === hintKey),
+      ...allChests.filter(c => `${c.x},${c.y},${c.z}` !== hintKey),
+    ];
 
     type Chest = {
       items(): Array<{ type: number; count: number; metadata: number }>;

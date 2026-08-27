@@ -57,6 +57,8 @@ export type TaskDescriptor =
       storageLabel: string;
       centerX: number; centerY: number; centerZ: number;
       chestCount: number;
+      /** If set, withdraw logs from this chest instead of mining them from the world. */
+      inputChestPos?: SerializedVec3;
     } };
 
 // ── Main → Worker messages ────────────────────────────────────────────────────

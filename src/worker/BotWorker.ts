@@ -189,7 +189,8 @@ port.on('message', async (msg: MainToWorkerMsg) => {
       const onFull = chestPos
         ? async () => { await adapter.depositAll(domainBot, new Vec3(chestPos.x, chestPos.y, chestPos.z)); }
         : undefined;
-      adapter.collect(domainBot, msg.blockName, msg.count, onFull)
+      const blockName = msg.blockName.includes(',') ? msg.blockName.split(',') : msg.blockName;
+      adapter.collect(domainBot, blockName, msg.count, onFull)
         .then(() => send({ type: 'CMD_RESULT', reqId: msg.reqId, success: true }))
         .catch(e => send({ type: 'CMD_RESULT', reqId: msg.reqId, success: false, error: e.message }));
       break;

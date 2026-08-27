@@ -2,6 +2,7 @@ import { MineflayerAdapter } from '../infrastructure/mineflayer/MineflayerAdapte
 import { Bot } from '../domain/entities/Bot';
 import { TaskDescriptor, TaskStatus, SerializedVec3 } from '../ipc/messages';
 import { Vec3 } from 'vec3';
+import { tracer } from '../infrastructure/Tracer';
 
 const WOOD_TYPES = [
   'oak_log', 'birch_log', 'spruce_log', 'jungle_log',
@@ -47,11 +48,36 @@ export class TaskRunner {
     this._currentTaskId = descriptor.id;
     this._status = 'running';
 
+    const invSnapshot = this.inventorySnapshot();
+    tracer.record(this.bot.username, this.bot.id, 'task_start', `Starting ${descriptor.type}`, {
+      taskId: descriptor.id,
+      taskType: descriptor.type,
+      params: descriptor.params,
+      inventory: invSnapshot,
+      position: this.positionSnapshot(),
+    });
+
     try {
       await this.execute(descriptor);
       this._status = 'complete';
+      tracer.record(this.bot.username, this.bot.id, 'task_complete', `Completed ${descriptor.type}`, {
+        taskId: descriptor.id,
+        taskType: descriptor.type,
+        inventory: this.inventorySnapshot(),
+        position: this.positionSnapshot(),
+      });
     } catch (err) {
       this._status = 'failed';
+      tracer.record(this.bot.username, this.bot.id, 'task_failed', `Failed ${descriptor.type}: ${(err as Error).message}`, {
+        taskId: descriptor.id,
+        taskType: descriptor.type,
+        error: (err as Error).message,
+        stack: (err as Error).stack,
+        params: descriptor.params,
+        inventoryBefore: invSnapshot,
+        inventoryAfter: this.inventorySnapshot(),
+        position: this.positionSnapshot(),
+      });
       throw err;
     } finally {
       this._currentTaskId = null;
@@ -69,6 +95,10 @@ export class TaskRunner {
     });
   }
 
+  private trace(event: string, detail: string, ctx: Record<string, unknown> = {}): void {
+    tracer.record(this.bot.username, this.bot.id, event, detail, ctx);
+  }
+
   private async execute(d: TaskDescriptor): Promise<void> {
     switch (d.type) {
       // ── Idle ───────────────────────────────────────────────────────────────
@@ -82,14 +112,15 @@ export class TaskRunner {
       case 'mine': {
         this.checkCancelled();
         const { blockName, count, chestPos } = d.params;
-        // If already carrying enough, skip mining
-        if (this.countInInventory(blockName) >= count) {
-          console.log(`[TaskRunner] ${this.bot.username}: already has ${count}x ${blockName}`);
+        const have = this.countInInventory(blockName);
+        this.trace('task_step', `mine: need ${count}x ${blockName}, have ${have}`, { blockName, count, have, chestPos });
+        if (have >= count) {
+          this.trace('task_step', `mine: already enough, depositing`, { have, count });
           if (chestPos) await this.adapter.depositAll(this.bot, toVec3(chestPos));
           break;
         }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
-        await this.adapter.collect(this.bot, blockName, count - this.countInInventory(blockName), onFull);
+        await this.adapter.collect(this.bot, blockName, count - have, onFull);
         break;
       }
 
@@ -97,17 +128,15 @@ export class TaskRunner {
       case 'collect_wood': {
         this.checkCancelled();
         const { count, chestPos } = d.params;
-        // If already carrying enough wood of any type, skip collection
         const woodInInventory = WOOD_TYPES.reduce((sum, w) => sum + this.countInInventory(w), 0);
+        this.trace('task_step', `collect_wood: need ${count}, have ${woodInInventory} logs`, { count, woodInInventory, chestPos });
         if (woodInInventory >= count) {
-          console.log(`[TaskRunner] ${this.bot.username}: already has ${woodInInventory} logs`);
+          this.trace('task_step', `collect_wood: already enough, depositing`, { woodInInventory, count });
           if (chestPos) await this.adapter.depositAll(this.bot, toVec3(chestPos));
           break;
         }
         const onFull = chestPos ? this.depositCallback(chestPos) : undefined;
-        // Pass all wood types at once — MiningBehavior picks the nearest accessible block
-        // scaffold=false: bots should not build towers to reach canopy logs (items fall away)
-        await this.adapter.collect(this.bot, WOOD_TYPES, count - woodInInventory, onFull, false);
+        await this.adapter.collect(this.bot, WOOD_TYPES, count - woodInInventory, onFull, true);
         break;
       }
 
@@ -115,6 +144,7 @@ export class TaskRunner {
       case 'deposit': {
         this.checkCancelled();
         const pos = toVec3(d.params.chestPos);
+        this.trace('task_step', `deposit: going to chest`, { chestPos: d.params.chestPos, inventory: this.inventorySnapshot() });
         await this.adapter.depositAll(this.bot, pos);
         break;
       }
@@ -167,23 +197,42 @@ export class TaskRunner {
       // ── Build storage ───────────────────────────────────────────────────────
       // Full chain: mine wood if needed → craft planks → craft chests → place → register
       case 'build_storage': {
-        const { storageLabel, centerX, centerY, centerZ, chestCount } = d.params;
+        const { storageLabel, centerX, centerY, centerZ, chestCount, inputChestPos } = d.params;
+
+        this.trace('task_step', `build_storage: starting "${storageLabel}" (${chestCount} chests)`, {
+          storageLabel, centerX, centerY, centerZ, chestCount, inputChestPos,
+          inventory: this.inventorySnapshot(),
+        });
 
         this.checkCancelled();
 
         // ── Step 1: Ensure enough wood logs ──────────────────────────────────
-        // 1 chest = 8 planks = 2 logs; also need 1 crafting_table = 1 log (first time)
         const logsNeeded = chestCount * 2 + 2;
-        await this.ensureWoodLogs(logsNeeded);
+        if (inputChestPos) {
+          const available = await this.withdrawLogs(toVec3(inputChestPos), logsNeeded);
+          this.trace('task_step', `build_storage: withdrew logs, have ${available}/${logsNeeded}`, {
+            available, logsNeeded, inventory: this.inventorySnapshot(),
+          });
+          if (available < logsNeeded) {
+            this.trace('task_step', `build_storage: not enough logs, waiting for miners`, { available, logsNeeded });
+            console.log(`[TaskRunner] ${this.bot.username}: only ${available}/${logsNeeded} logs available — waiting for miners…`);
+            await Promise.race([sleep(10_000), this.cancellationToken()]);
+            break;
+          }
+        } else {
+          this.trace('task_step', `build_storage: self-collecting ${logsNeeded} logs`, { logsNeeded });
+          await this.ensureWoodLogs(logsNeeded);
+        }
         this.checkCancelled();
 
         // ── Step 2: Craft planks from logs ────────────────────────────────────
-        // 1 log → 4 planks
-        const planksNeeded = chestCount * 8 + 4; // extra 4 for crafting table
+        const planksNeeded = chestCount * 8 + 4;
+        this.trace('task_step', `build_storage: crafting ${planksNeeded} planks`, { planksNeeded, inventory: this.inventorySnapshot() });
         await this.craftPlanks(planksNeeded);
         this.checkCancelled();
 
-        // ── Step 3: Craft chests (needs crafting table, 8 planks each) ───────
+        // ── Step 3: Craft chests ─────────────────────────────────────────────
+        this.trace('task_step', `build_storage: crafting ${chestCount} chests`, { chestCount, inventory: this.inventorySnapshot() });
         await this.adapter.craftItem(this.bot, 'chest', chestCount);
         this.checkCancelled();
 
@@ -214,6 +263,41 @@ export class TaskRunner {
 
   // ── Build-storage helpers ───────────────────────────────────────────────
 
+  /**
+   * Try to withdraw logs from the input chest (any wood type).
+   * Returns total logs available in inventory after withdrawal (chest + what was already held).
+   *
+   * StorageBehavior.withdraw returns 0 when an item isn't found — it does not throw.
+   * Errors here are real infrastructure failures (pathfinding, chest unreachable) and
+   * should propagate rather than being swallowed by a catch-all.
+   */
+  private async withdrawLogs(chestPos: Vec3, needed: number): Promise<number> {
+    const mfBot = this.bot.handle as { inventory: { items(): Array<{ name: string; count: number }> } } | null;
+    if (!mfBot) return 0;
+
+    const currentLogs = mfBot.inventory.items()
+      .filter(i => WOOD_TYPES.includes(i.name))
+      .reduce((s, i) => s + i.count, 0);
+
+    if (currentLogs >= needed) return currentLogs;
+
+    const toWithdraw = needed - currentLogs;
+    let withdrawn = 0;
+
+    for (const logType of WOOD_TYPES) {
+      if (withdrawn >= toWithdraw) break;
+      // withdraw() returns 0 if the item is absent — no exception. Any exception thrown
+      // here is a real failure (navigation timeout, chest blocked) and must not be masked.
+      const got = await this.adapter.withdraw(this.bot, chestPos, logType, toWithdraw - withdrawn);
+      if (got > 0) {
+        console.log(`[TaskRunner] ${this.bot.username}: withdrew ${got}x ${logType} from input chest`);
+        withdrawn += got;
+      }
+    }
+
+    return currentLogs + withdrawn;
+  }
+
   private async ensureWoodLogs(needed: number): Promise<void> {
     const mfBot = this.bot.handle as { inventory: { items(): Array<{ name: string; count: number }> } } | null;
     if (!mfBot) return;
@@ -232,31 +316,43 @@ export class TaskRunner {
 
   }
 
+  /**
+   * Craft planks from logs in inventory until `needed` planks are available.
+   *
+   * The critical fix: after each craftItem call, re-read the inventory count.
+   * The previous implementation returned on the first successful craft without
+   * checking whether that single log stack was large enough to cover the full
+   * need. If oak logs were insufficient, birch logs were never used.
+   */
   private async craftPlanks(needed: number): Promise<void> {
     const mfBot = this.bot.handle as { inventory: { items(): Array<{ name: string; count: number }> } } | null;
     if (!mfBot) return;
 
-    const currentPlanks = mfBot.inventory.items()
+    const countPlanks = () => mfBot.inventory.items()
       .filter(i => i.name.endsWith('_planks'))
       .reduce((s, i) => s + i.count, 0);
 
-    if (currentPlanks >= needed) return;
+    if (countPlanks() >= needed) return;
 
     // Each log → 4 planks; craft in batches by log type
     const logs = mfBot.inventory.items().filter(i => i.name.endsWith('_log'));
     for (const logStack of logs) {
       this.checkCancelled();
+      const currentPlanks = countPlanks();
+      if (currentPlanks >= needed) return;
+
       const plankName = logStack.name.replace('_log', '_planks');
       // mfBot.craft count = number of craft operations (not items). Each plank recipe yields 4 planks.
       const craftOps = Math.ceil((needed - currentPlanks) / 4);
-      try {
-        await this.adapter.craftItem(this.bot, plankName, craftOps);
-        return;
-      } catch {
-        // wrong plank type, try next
-      }
+      await this.adapter.craftItem(this.bot, plankName, craftOps);
+      // Re-read after craft: if this log stack was too small to cover the full deficit,
+      // loop continues and tries the next log type rather than exiting prematurely.
     }
-    throw new Error('Could not craft planks — no logs in inventory');
+
+    const finalPlanks = countPlanks();
+    if (finalPlanks < needed) {
+      throw new Error(`Could not craft enough planks: have ${finalPlanks}, need ${needed}`);
+    }
   }
 
   private depositCallback(chestPos: { x: number; y: number; z: number }) {
@@ -273,6 +369,23 @@ export class TaskRunner {
     return mfBot.inventory.items()
       .filter(i => i.name === itemName)
       .reduce((sum, i) => sum + i.count, 0);
+  }
+
+  private inventorySnapshot(): Array<{ name: string; count: number }> {
+    const mfBot = this.bot.handle as { inventory: { items(): Array<{ name: string; count: number }> } } | null;
+    if (!mfBot) return [];
+    const map = new Map<string, number>();
+    for (const item of mfBot.inventory.items()) {
+      map.set(item.name, (map.get(item.name) ?? 0) + item.count);
+    }
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
+  }
+
+  private positionSnapshot(): { x: number; y: number; z: number } | null {
+    const mfBot = this.bot.handle as { entity?: { position: { x: number; y: number; z: number } } } | null;
+    if (!mfBot?.entity) return null;
+    const p = mfBot.entity.position;
+    return { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
   }
 }
 

@@ -63,14 +63,15 @@ export class CraftingBehavior {
   // ── Private helpers ──────────────────────────────────────────────────────
 
   private async ensureCraftingTable(domainBot: Bot, mfBot: MineflayerBot): Promise<Block> {
-    // 1. Look for nearby table
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mcData = require('minecraft-data')(mfBot.version);
     const tableId = (mcData.blocksByName as Record<string, { id: number }>)['crafting_table']?.id;
 
+    // 1. Look for an existing table within 32 blocks — reuse if found.
+    //    Large radius so placed tables near the base are found even after the bot wanders.
     const existing = (mfBot.findBlock as Function)({
       matching: tableId,
-      maxDistance: 6,
+      maxDistance: 32,
     }) as Block | null;
 
     if (existing) {
@@ -81,44 +82,92 @@ export class CraftingBehavior {
     // 2. Need to place one — craft it first if not in inventory
     const hasTable = mfBot.inventory.items().some(i => i.name === 'crafting_table');
     if (!hasTable) {
-      // Craft from planks (2×2, no table needed)
       await this.craft(domainBot, 'crafting_table', 1);
     }
 
-    // 3. Place the table on the block in front of the bot
+    // 3. Find a clear surface and place the table there
     return this.placeCraftingTable(domainBot, mfBot);
   }
 
+  /**
+   * Find an exposed solid block nearby, navigate ADJACENT to it using
+   * GoalGetToBlock (so the bot is never standing on the target position),
+   * then place the crafting table on top of that block.
+   *
+   * This avoids the two main failure modes:
+   *   a) Bot surrounded by tree trunks — findBlock skips those because
+   *      they have no empty space above.
+   *   b) Server rejects placement at bot's feet — GoalGetToBlock puts the
+   *      bot NEXT TO the target, not on top of it.
+   */
   private async placeCraftingTable(domainBot: Bot, mfBot: MineflayerBot): Promise<Block> {
     const tableItem = mfBot.inventory.items().find(i => i.name === 'crafting_table');
     if (!tableItem) throw new Error('No crafting_table in inventory');
-    await mfBot.equip(tableItem as Parameters<MineflayerBot['equip']>[0], 'hand');
 
-    // Place on the block directly below the bot's feet (stand on top)
-    const feetPos  = mfBot.entity.position.floored();
-    const belowPos = feetPos.offset(0, -1, 0);
-    const below    = mfBot.blockAt(belowPos);
-    if (!below) throw new Error('No solid block to place crafting table on');
+    // The block directly below the bot's feet — we cannot place the table here
+    // because the server considers it occupied by the bot's hitbox.
+    const botFloor = mfBot.entity.position.floored().offset(0, -1, 0);
 
-    if (below.boundingBox !== 'block') throw new Error('Block below bot is not solid — cannot place crafting table');
+    // Find an exposed solid block: solid floor with empty/replaceable air above.
+    // useExtraInfo=true lets the callback read block data via mfBot.blockAt().
+    const floorBlock = (mfBot.findBlock as Function)({
+      matching: (b: Block) => {
+        if (b.boundingBox !== 'block') return false;
+        // Skip the block the bot is standing on — placing above it = bot's feet position
+        if (b.position.x === botFloor.x &&
+            b.position.y === botFloor.y &&
+            b.position.z === botFloor.z) return false;
+        // The slot directly above must be empty (where the crafting table will land)
+        const above = mfBot.blockAt(b.position.offset(0, 1, 0));
+        return !above || above.boundingBox !== 'block';
+      },
+      maxDistance: 16,
+      useExtraInfo: true,
+    }) as Block | null;
 
-    // If the target position already has a crafting table (e.g. from a previous session), reuse it.
-    const alreadyThere = mfBot.blockAt(feetPos);
-    if (alreadyThere?.name === 'crafting_table') return alreadyThere;
-
-    try {
-      await mfBot.placeBlock(below, new Vec3(0, 1, 0));
-    } catch {
-      // placeBlock may time out even when placement succeeded (server lag or missed blockUpdate).
-      // Fall through and verify the block state directly.
+    if (!floorBlock) {
+      throw new Error('No suitable surface found for crafting table within 16 blocks');
     }
 
-    // Give the server a moment to confirm the placement before reading world state.
-    await new Promise(r => setTimeout(r, 400));
+    const targetPos = floorBlock.position.offset(0, 1, 0);
 
-    const placed = mfBot.blockAt(feetPos);
-    if (!placed || placed.name !== 'crafting_table') throw new Error('Crafting table was not placed');
-    return placed;
+    // Reuse if another bot or a previous attempt already placed a table here
+    const alreadyThere = mfBot.blockAt(targetPos);
+    if (alreadyThere?.name === 'crafting_table') return alreadyThere;
+
+    // GoalGetToBlock navigates the bot to a position adjacent to the target block,
+    // never ON TOP of it — exactly what we need so the server accepts the placement.
+    mfBot.pathfinder.setMovements(createMovements(mfBot));
+    await new Promise<void>(res => {
+      mfBot.pathfinder.setGoal(new goals.GoalGetToBlock(targetPos.x, targetPos.y, targetPos.z));
+      mfBot.once('goal_reached', res);
+      setTimeout(res, 15_000);
+    });
+
+    // Re-equip after navigation (slot order may have shifted)
+    const freshItem = mfBot.inventory.items().find(i => i.name === 'crafting_table');
+    if (!freshItem) throw new Error('Lost crafting table during navigation');
+    await mfBot.equip(freshItem as Parameters<MineflayerBot['equip']>[0], 'hand');
+
+    // Verify the floor block is still solid (could have changed)
+    const freshFloor = mfBot.blockAt(floorBlock.position);
+    if (!freshFloor || freshFloor.boundingBox !== 'block') {
+      throw new Error('Floor block changed during navigation');
+    }
+
+    try {
+      await mfBot.placeBlock(freshFloor, new Vec3(0, 1, 0));
+    } catch {
+      // placeBlock rejects with a timeout even when the placement succeeds on the server.
+      // Fall through and verify world state.
+    }
+
+    await new Promise(r => setTimeout(r, 800));
+
+    const placed = mfBot.blockAt(targetPos);
+    if (placed?.name === 'crafting_table') return placed;
+
+    throw new Error('Crafting table was not placed');
   }
 
   private navigateTo(mfBot: MineflayerBot, pos: Vec3, radius: number): Promise<void> {

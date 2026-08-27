@@ -6,7 +6,7 @@ import { BotState } from '../../../domain/value-objects/BotState';
 import { QuarryQueue } from '../../mining/QuarryQueue';
 import { MetaStore } from '../BotMeta';
 import { createMovements, createScaffoldMovements } from '../physics/PhysicsPatch';
-import { isInventoryFull } from './StorageBehavior';
+import { isInventoryFull } from '../utils';
 
 /** Called by mining loops when the inventory is full. Implementations deposit to a chest. */
 export type DepositFn = (bot: Bot) => Promise<void>;

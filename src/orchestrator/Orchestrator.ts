@@ -1,5 +1,5 @@
 import { IBotRepository } from '../domain/repositories/IBotRepository';
-import { WorkerCommandAdapter } from '../worker/WorkerCommandAdapter';
+import { IOrchestratorAdapter } from './IOrchestratorAdapter';
 import { StorageCache } from '../infrastructure/storage/StorageCache';
 import { Vec3 } from 'vec3';
 import {
@@ -8,6 +8,7 @@ import {
 } from './GlobalState';
 import { assignRoles, mineTargetForPhase, isInventoryFull } from './RoleSystem';
 import type { BotSnapshot, TaskDescriptor } from '../ipc/messages';
+import { tracer } from '../infrastructure/Tracer';
 
 const TICK_MS    = 2_000;  // how often the Orchestrator wakes up
 const MAX_FAILS  = 3;      // pause autonomous assignment for a bot after N consecutive failures
@@ -34,7 +35,7 @@ export class Orchestrator {
   private readonly paused = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
-    private readonly adapter: WorkerCommandAdapter,
+    private readonly adapter: IOrchestratorAdapter,
     private readonly repository: IBotRepository,
     private readonly storage: StorageCache,
     /** If false the Orchestrator only tracks state but never assigns tasks. */
@@ -63,7 +64,13 @@ export class Orchestrator {
     adapter.on('task_failed', (botId: string, _taskId: string, error: string) => {
       console.warn(`[Orchestrator] ${botId} failed: ${error}`);
       const rec = this.state.bots.get(botId);
-      if (rec) { rec.taskStatus = 'idle'; rec.failCount++; rec.currentTaskType = null; }
+      if (rec) {
+        tracer.record(rec.username, botId, 'orch_task_failed', `Task failed (fail #${rec.failCount + 1}): ${error}`, {
+          role: rec.role, failCount: rec.failCount + 1, taskType: rec.currentTaskType,
+          inventory: rec.inventory, position: rec.position, phase: this.state.phase,
+        });
+        rec.taskStatus = 'idle'; rec.failCount++; rec.currentTaskType = null;
+      }
     });
 
     // When a bot disconnects, mark it idle and pause autonomous assignment
@@ -156,6 +163,9 @@ export class Orchestrator {
       }
     });
 
+    // Auto-advance phase based on storage progress
+    this.autoAdvancePhase();
+
     // Assign tasks to idle bots
     for (const bot of onlineBots) {
       const rec = this.state.bots.get(bot.id);
@@ -171,6 +181,13 @@ export class Orchestrator {
 
       const task = this.selectTask(rec);
       if (task) {
+        tracer.record(rec.username, bot.id, 'orch_assign', `Assigning ${task.type} (role=${rec.role}, phase=${this.state.phase})`, {
+          taskId: task.id, taskType: task.type, params: task.params,
+          role: rec.role, phase: this.state.phase,
+          inventory: rec.inventory, position: rec.position,
+          storagePos: this.state.storagePos,
+          registeredChests: this.storage.list().length,
+        });
         rec.taskStatus       = 'running';
         rec.lastTaskAt       = Date.now();
         rec.currentTaskType  = task.type;
@@ -212,9 +229,13 @@ export class Orchestrator {
           const woodCount = rec.inventory
             .filter(i => i.name.endsWith('_log'))
             .reduce((s, i) => s + i.count, 0);
-          // Already have enough wood but nowhere to deposit — wait for builder to set up storage.
-          if (woodCount >= 16 && !chestPos) return this.idle(5_000);
-          return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos: chestPos ?? undefined } };
+          // No storage yet — wait for builder to set up the input chest.
+          if (!chestPos) {
+            if (woodCount >= 16) return this.idle(5_000); // carrying enough, just hold
+            return { id: this.nextId(), type: 'collect_wood', params: { count: 16 } };
+          }
+          // Input chest exists — collect wood and deposit to it continuously.
+          return { id: this.nextId(), type: 'collect_wood', params: { count: 16, chestPos } };
         }
         const blockName = mineTargetForPhase(phase);
         return { id: this.nextId(), type: 'mine', params: { blockName, count: 16, chestPos: chestPos ?? undefined } };
@@ -233,60 +254,47 @@ export class Orchestrator {
         return { id: this.nextId(), type: 'guard', params: { x: 0, y: 64, z: 0, radius: 32 } };
 
       case 'builder': {
-        // If no storage exists at all, the builder's first job is to construct one
-        const hasAnyStorage = this.storage.list().length > 0 || this.state.storagePos !== null;
-        if (!hasAnyStorage) {
+        const inputChestVec = this.storage.getByLabel('input');
+        const baseChests    = this.storage.list().filter(s => s.label.startsWith('base'));
+
+        // ── Phase A: Bootstrap — no input chest yet ───────────────────────────
+        // Builder self-collects the minimum wood needed for 1 chest, places it,
+        // and registers it as the shared "input" drop-off point for miners.
+        if (!inputChestVec) {
           return {
             id: this.nextId(),
             type: 'build_storage',
             params: {
-              storageLabel: 'base',
+              storageLabel: 'input',
               centerX: rec.position?.x ?? 0,
-              centerY: (rec.position?.y ?? 64),
-              centerZ: (rec.position?.z ?? 0) + 3,
-              chestCount: 4,
+              centerY: rec.position?.y ?? 64,
+              centerZ: (rec.position?.z ?? 0) + 2,
+              chestCount: 1,
+              // no inputChestPos → builder collects its own wood for this first chest
             },
           };
         }
 
-        // Deposit if carrying too much
+        // ── Phase B: Deposit if inventory is full ─────────────────────────────
         if (isInventoryFull(rec) && chestPos) {
           return { id: this.nextId(), type: 'deposit', params: { chestPos } };
         }
 
-        // Count craftable materials in inventory
-        const planks = rec.inventory
-          .filter(i => i.name.endsWith('_planks'))
-          .reduce((s, i) => s + i.count, 0);
-        const logEntry = rec.inventory.find(i => i.name.endsWith('_log'));
-
-        // If enough planks to craft at least one chest (8 planks each), craft them
-        if (planks >= 8) {
-          return { id: this.nextId(), type: 'craft', params: { itemName: 'chest', count: Math.floor(planks / 8) } };
-        }
-
-        // If has logs but not enough planks, convert them first
-        if (logEntry) {
-          const plankName = logEntry.name.replace('_log', '_planks');
-          // count = número de operações de craft (não de itens); 1 op = 1 log → 4 planks
-          return { id: this.nextId(), type: 'craft', params: { itemName: plankName, count: logEntry.count } };
-        }
-
-        // Sem materiais em mãos — tenta retirar logs do baú, senão coleta direto
-        if (chestPos) {
-          return { id: this.nextId(), type: 'withdraw', params: { chestPos, itemName: 'oak_log', count: 16 } };
-        }
-        return { id: this.nextId(), type: 'collect_wood', params: { count: 16 } };
-
-        // Nothing to do — guard the base
+        // ── Phase C: Expand storage using miners' deposits ────────────────────
+        // Each expansion run withdraws logs from the input chest, crafts chests,
+        // and places them in a row anchored to the input chest.
+        const inputPos = { x: inputChestVec.x, y: inputChestVec.y, z: inputChestVec.z };
         return {
           id: this.nextId(),
-          type: 'guard',
+          type: 'build_storage',
           params: {
-            x: rec.position?.x ?? 0,
-            y: rec.position?.y ?? 64,
-            z: rec.position?.z ?? 0,
-            radius: 20,
+            storageLabel:  'base',
+            // Spread chests in +X from the input chest, 2 blocks apart per slot
+            centerX: inputChestVec.x + (baseChests.length + 1) * 2,
+            centerY: inputChestVec.y,
+            centerZ: inputChestVec.z,
+            chestCount:    2,
+            inputChestPos: inputPos,
           },
         };
       }
@@ -298,5 +306,20 @@ export class Orchestrator {
 
   private idle(ms: number): TaskDescriptor {
     return { id: this.nextId(), type: 'idle', params: { durationMs: ms } };
+  }
+
+  /**
+   * Automatically advance the colony phase when storage milestones are met.
+   * Called once per tick — only logs when a transition actually happens.
+   */
+  private autoAdvancePhase(): void {
+    const { phase } = this.state;
+    const baseChests = this.storage.list().filter(s => s.label.startsWith('base'));
+
+    if (phase === 'bootstrap' && baseChests.length >= 4) {
+      this.state.phase = 'resource_gathering';
+      console.log('[Orchestrator] 🏗️  Phase → resource_gathering (4+ base chests built)');
+    }
+    // Future: resource_gathering → base_building when enough stone/iron, etc.
   }
 }

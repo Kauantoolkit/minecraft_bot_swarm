@@ -54,11 +54,11 @@ export const ROLE_TASK_PRIORITY: Record<Role, string[]> = {
 
 export function mineTargetForPhase(phase: ColonyPhase): string {
   switch (phase) {
-    case 'bootstrap':          return 'oak_log';
+    case 'bootstrap':          return 'stone'; // bootstrap uses collect_wood — this branch is unreachable
     case 'resource_gathering': return 'iron_ore';
     case 'base_building':      return 'stone';
     case 'expansion':          return 'diamond_ore';
-    case 'combat':             return 'stone'; // keep gathering during combat
+    case 'combat':             return 'stone';
   }
 }
 

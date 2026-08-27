@@ -63,6 +63,11 @@ export class MineflayerAdapter implements IBotAdapter {
     return this.metaStore.get(bot);
   }
 
+  getPosition(domainBot: Bot): Vec3 | null {
+    const mfBot = domainBot.handle as MineflayerBot | null;
+    return (mfBot?.entity?.position as Vec3 | undefined) ?? null;
+  }
+
   /** Returns the current active mode string for display in the debug UI. */
   getMode(bot: Bot): string {
     const meta = this.metaStore.get(bot);
@@ -133,7 +138,29 @@ export class MineflayerAdapter implements IBotAdapter {
 
       // Auto-respawn when bot dies (sends the "Respawn" packet after 1.5 s)
       mfBot.on('death', () => {
-        console.warn(`[MineflayerAdapter] ${domainBot.username} died — respawning in 1.5 s`);
+        const pos = mfBot.entity?.position;
+        const posStr = pos
+          ? `(${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)})`
+          : '(unknown)';
+
+        // Find the nearest hostile mob as a likely killer.
+        type AnyEntity = { name?: string; position: Vec3 };
+        const nearestHostile = pos
+          ? (Object.values(mfBot.entities) as AnyEntity[])
+              .filter(e => e.name && HOSTILE_MOBS.has(e.name.toLowerCase()))
+              .reduce<{ name: string; dist: number } | null>((best, e) => {
+                const d = e.position.distanceTo(pos);
+                return !best || d < best.dist ? { name: e.name!, dist: d } : best;
+              }, null)
+          : null;
+
+        const killerStr = nearestHostile
+          ? `likely killer: ${nearestHostile.name} at ${Math.floor(nearestHostile.dist)}m`
+          : 'no nearby hostile mob detected';
+
+        console.warn(
+          `[MineflayerAdapter] ${domainBot.username} DIED at ${posStr} — ${killerStr} — respawning in 1.5 s`,
+        );
         setTimeout(() => {
           try { mfBot.respawn(); } catch { /* ignore if already respawned */ }
         }, 1500);
@@ -364,10 +391,16 @@ export class MineflayerAdapter implements IBotAdapter {
     return targetPos;
   }
 
-  // ─── Storage scan (worker-safe) ───────────────────────────────────────────
+  // ─── Storage scan ─────────────────────────────────────────────────────────
 
   scanNearbyChests(domainBot: Bot, x: number, y: number, z: number, radius: number): Promise<Array<{ x: number; y: number; z: number }>> {
     return this.storageBehavior.scanNearbyChests(domainBot, x, y, z, radius);
+  }
+
+  /** Not applicable in direct mode — use WorkerCommandAdapter for multi-bot scanning. */
+  scanStorage(_botId: string, _x: number, _y: number, _z: number, _radius: number): Promise<Array<{ x: number; y: number; z: number }>> {
+    console.warn('[MineflayerAdapter] scanStorage is only available in worker mode');
+    return Promise.resolve([]);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

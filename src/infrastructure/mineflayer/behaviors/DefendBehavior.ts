@@ -168,11 +168,14 @@ export class DefendBehavior {
         if (now >= expiry) noPathBlacklist.delete(id);
       }
 
-      // Priority 2 — hostile mobs (skip recently-unreachable ones)
+      // Priority 2 — hostile mobs (skip recently-unreachable ones).
+      // Creepers are intentionally excluded: chasing them triggers their explosion.
+      // The flee logic at Priority 1 handles them when close; otherwise they are ignored.
       const allMobs = Object.values(mfBot.entities).filter((e) => {
         const entity = e as AnyEntity;
         return entity.name !== undefined &&
           HOSTILE_MOBS.has(entity.name.toLowerCase()) &&
+          entity.name !== 'creeper' &&
           entity.position.distanceTo(mfBot.entity.position) < radius &&
           !noPathBlacklist.has(entity.id);
       }) as AnyEntity[];

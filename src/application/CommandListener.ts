@@ -1,4 +1,9 @@
 import readline from 'readline';
+
+const WOOD_TYPES = [
+  'oak_log', 'birch_log', 'spruce_log', 'jungle_log',
+  'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log',
+];
 import fs from 'fs';
 import path from 'path';
 import { SwarmController } from './SwarmController';
@@ -6,7 +11,7 @@ import { BotManager } from './BotManager';
 import { BotGroupStore } from './BotGroupStore';
 import { IBotRepository } from '../domain/repositories/IBotRepository';
 import { IBotAdapter } from '../infrastructure/mineflayer/IBotAdapter';
-import { WorkerCommandAdapter } from '../worker/WorkerCommandAdapter';
+import { IChatEventSource } from './IChatEventSource';
 import { config } from '../config';
 import { Bot as MineflayerBot } from 'mineflayer';
 import { BotTarget } from './SwarmController';
@@ -22,6 +27,8 @@ export class CommandListener {
     private readonly adapter: IBotAdapter,
     private readonly botManager: BotManager,
     private readonly groups: BotGroupStore,
+    /** If provided, chat events come from this source (worker mode). Otherwise falls back to mfBot.on('chat'). */
+    private readonly chatSource?: IChatEventSource,
   ) {}
 
   startConsole(): void {
@@ -47,10 +54,9 @@ export class CommandListener {
   }
 
   attachChatListeners(): void {
-    if (this.adapter instanceof WorkerCommandAdapter) {
-      // Worker mode: chat events are forwarded from each worker as CHAT_MSG messages.
-      // We only need one global listener on the adapter — dedup is handled below.
-      this.adapter.on('chat_msg', (botId: string, username: string, message: string) => {
+    if (this.chatSource) {
+      // Worker mode: one global listener on the chat source — dedup handled below.
+      this.chatSource.on('chat_msg', (_botId: string, username: string, message: string) => {
         if (username !== config.master.username) return;
         const now = Date.now();
         if (message === this.lastChat.input && now - this.lastChat.time < 1000) return;
@@ -61,7 +67,7 @@ export class CommandListener {
       return;
     }
 
-    // Direct mode: attach to the mineflayer bot handle directly
+    // Direct mode: attach to the mineflayer bot handle directly.
     this.repository.findAll().forEach(domainBot => {
       const mfBot = domainBot.handle as MineflayerBot | null;
       if (!mfBot) return;
@@ -218,17 +224,19 @@ export class CommandListener {
 
       // ── Resources ─────────────────────────────────────────────────────────
       case 'collect': {
-        // collect <block> [count] [--vein] [--store <label>]
+        // collect <block|wood> [count] [--vein] [--store <label>]
+        // Use "wood" as an alias for all log types (oak, birch, spruce, etc.)
         const storeIdx = args.indexOf('--store');
         const storageLabel = storeIdx >= 0 ? args[storeIdx + 1] : undefined;
         const cleanArgs = storeIdx >= 0
           ? args.filter((_, i) => i !== storeIdx && i !== storeIdx + 1)
           : args;
-        const [blockName, rawCount, flag] = cleanArgs;
-        if (!blockName) { console.log('Usage: collect <blockName> [count] [--vein] [--store <label>]'); break; }
+        const [rawBlockName, rawCount, flag] = cleanArgs;
+        if (!rawBlockName) { console.log('Usage: collect <blockName|wood> [count] [--vein] [--store <label>]'); break; }
+        const blockName = rawBlockName === 'wood' ? WOOD_TYPES : rawBlockName;
         const count = parseInt(rawCount, 10) || 1;
         if (flag === '--vein' || flag === 'vein') {
-          this.controller.collectVeinAll(blockName, count, storageLabel, target);
+          this.controller.collectVeinAll(Array.isArray(blockName) ? blockName[0] : blockName, count, storageLabel, target);
         } else {
           this.controller.collectAll(blockName, count, storageLabel, target);
         }
@@ -306,20 +314,16 @@ export class CommandListener {
               console.log('Usage: store scan <label> <x> <y> <z> [radius=16]');
               break;
             }
-            if (!(this.adapter instanceof WorkerCommandAdapter)) {
-              console.log('[Storage] store scan requires worker mode');
-              break;
-            }
             const scanBots = this.repository.findAll().filter(b => b.isOnline());
             if (scanBots.length === 0) { console.log('[Storage] No bots online'); break; }
             const scanBot = scanBots[0];
             console.log(`[Storage] ${scanBot.username} scanning for chests near (${sx2},${sy2},${sz2}) r=${radius}...`);
             this.adapter.scanStorage(scanBot.id, sx2, sy2, sz2, radius)
-              .then(positions => {
+              .then((positions: Array<{ x: number; y: number; z: number }>) => {
                 const added = this.controller.storage.registerMany(scanLabel, positions);
                 console.log(`[Storage] Scan complete — ${added} new chest(s) registered under "${scanLabel}"`);
               })
-              .catch(err => console.warn(`[Storage] Scan failed: ${err.message}`));
+              .catch((err: Error) => console.warn(`[Storage] Scan failed: ${err.message}`));
             break;
           }
           default:

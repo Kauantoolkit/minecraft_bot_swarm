@@ -19,6 +19,8 @@ export interface IBotAdapter {
   spawn(bot: Bot, options: ConnectionOptions): Promise<void>;
   disconnect(bot: Bot): void;
   getMode(bot: Bot): string;
+  /** Returns the bot's current world position, or null if unavailable. */
+  getPosition(bot: Bot): Vec3 | null;
 
   // Movement
   moveTo(bot: Bot, x: number, y: number, z: number): Promise<void>;
@@ -41,7 +43,7 @@ export interface IBotAdapter {
   stopAvoid(bot: Bot): void;
 
   // Resources
-  collect(bot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void>;
+  collect(bot: Bot, blockName: string | string[], count: number, onFull?: DepositFn): Promise<void>;
   collectVein(bot: Bot, blockName: string, count: number, onFull?: DepositFn): Promise<void>;
   quarryFromQueue(bot: Bot, queue: QuarryQueue, onFull?: DepositFn): Promise<void>;
   depositAll(bot: Bot, chestPos: Vec3): Promise<void>;
@@ -59,4 +61,10 @@ export interface IBotAdapter {
   stopFarm(bot: Bot): void;
   explore(bot: Bot, direction: 'north' | 'south' | 'east' | 'west' | 'auto'): Promise<void>;
   stopExplore(bot: Bot): void;
+
+  /**
+   * Send one bot to scan for chest/barrel blocks near (x,y,z) within radius.
+   * Returns an empty array in direct (single-thread) mode.
+   */
+  scanStorage(botId: string, x: number, y: number, z: number, radius: number): Promise<Array<{ x: number; y: number; z: number }>>;
 }

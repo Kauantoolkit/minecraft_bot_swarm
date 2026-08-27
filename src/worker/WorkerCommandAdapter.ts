@@ -9,6 +9,8 @@ import { SwarmIntel } from '../application/SwarmIntel';
 import { PlayerRelationshipStore } from '../domain/value-objects/PlayerRelationship';
 import { ConnectionOptions } from '../infrastructure/network/NetworkProvider';
 import { IBotAdapter } from '../infrastructure/mineflayer/IBotAdapter';
+import { IOrchestratorAdapter } from '../orchestrator/IOrchestratorAdapter';
+import { IChatEventSource } from '../application/IChatEventSource';
 import { Vec3 } from 'vec3';
 import type { DepositFn } from '../infrastructure/mineflayer/behaviors/MiningBehavior';
 import type {
@@ -34,7 +36,7 @@ import type {
  *   'chat_msg'       (botId: string, username: string, message: string)
  *   'disconnected'   (botId: string, reason: string)
  */
-export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
+export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter, IOrchestratorAdapter, IChatEventSource {
   private readonly workers   = new Map<string, Worker>();
   private readonly snapshots = new Map<string, BotSnapshot>();
   private reqCounter = 0;
@@ -159,10 +161,25 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
     return this.snapshots.get(botId);
   }
 
+  getPosition(domainBot: Bot): Vec3 | null {
+    const snap = this.snapshots.get(domainBot.id);
+    if (!snap?.position) return null;
+    return new Vec3(snap.position.x, snap.position.y, snap.position.z);
+  }
+
   // ── Internal send helpers ─────────────────────────────────────────────────
 
   private send(botId: string, msg: MainToWorkerMsg): void {
     this.workers.get(botId)?.postMessage(msg);
+  }
+
+  /**
+   * Send an operator command and notify the Orchestrator so it can pause
+   * autonomous task assignment for this bot (manual override active).
+   */
+  private sendOperator(botId: string, msg: MainToWorkerMsg): void {
+    this.send(botId, msg);
+    this.emit('cmd_override', botId);
   }
 
   private nextReqId(): string {
@@ -177,76 +194,83 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
     });
   }
 
+  /** Like sendAsync but also emits cmd_override so the Orchestrator pauses this bot. */
+  private sendOperatorAsync<T = void>(botId: string, buildMsg: (reqId: string) => MainToWorkerMsg): Promise<T> {
+    this.emit('cmd_override', botId);
+    return this.sendAsync<T>(botId, buildMsg);
+  }
+
   // ── Movement ──────────────────────────────────────────────────────────────
 
   moveTo(bot: Bot, x: number, y: number, z: number): Promise<void> {
-    return this.sendAsync(bot.id, reqId => ({ type: 'CMD_MOVE_TO', reqId, x, y, z }));
+    return this.sendOperatorAsync(bot.id, reqId => ({ type: 'CMD_MOVE_TO', reqId, x, y, z }));
   }
 
   follow(bot: Bot, targetUsername: string): void {
-    this.send(bot.id, { type: 'CMD_FOLLOW', username: targetUsername });
+    this.sendOperator(bot.id, { type: 'CMD_FOLLOW', username: targetUsername });
   }
 
   stop(bot: Bot): void {
-    this.send(bot.id, { type: 'CMD_STOP' });
+    this.sendOperator(bot.id, { type: 'CMD_STOP' });
   }
 
   // ── Chat ──────────────────────────────────────────────────────────────────
 
   say(bot: Bot, message: string): void {
-    this.send(bot.id, { type: 'CMD_SAY', message });
+    this.sendOperator(bot.id, { type: 'CMD_SAY', message });
   }
 
   // ── Combat ────────────────────────────────────────────────────────────────
 
   attack(bot: Bot, targetUsername: string): void {
-    this.send(bot.id, { type: 'CMD_ATTACK', username: targetUsername });
+    this.sendOperator(bot.id, { type: 'CMD_ATTACK', username: targetUsername });
   }
 
   pvp(bot: Bot, targetUsernames: string[], _intel?: SwarmIntel, _rel?: PlayerRelationshipStore): void {
-    this.send(bot.id, { type: 'CMD_PVP', usernames: targetUsernames });
+    this.sendOperator(bot.id, { type: 'CMD_PVP', usernames: targetUsernames });
   }
 
   stopPvp(bot: Bot): void {
-    this.send(bot.id, { type: 'CMD_STOP_PVP' });
+    this.sendOperator(bot.id, { type: 'CMD_STOP_PVP' });
   }
 
   guard(bot: Bot, x: number, y: number, z: number, radius: number, excludeUsernames: string[], _rel?: PlayerRelationshipStore): void {
-    this.send(bot.id, { type: 'CMD_GUARD', x, y, z, radius, excludeUsernames });
+    this.sendOperator(bot.id, { type: 'CMD_GUARD', x, y, z, radius, excludeUsernames });
   }
 
   stopGuard(bot: Bot): void {
-    this.send(bot.id, { type: 'CMD_STOP_GUARD' });
+    this.sendOperator(bot.id, { type: 'CMD_STOP_GUARD' });
   }
 
   bodyguard(bot: Bot, protectedUsername: string, radius: number, swarmUsernames: string[], _rel?: PlayerRelationshipStore, _intel?: SwarmIntel): void {
-    this.send(bot.id, { type: 'CMD_BODYGUARD', protectedUsername, radius, swarmUsernames });
+    this.sendOperator(bot.id, { type: 'CMD_BODYGUARD', protectedUsername, radius, swarmUsernames });
   }
 
   startDefend(bot: Bot, radius: number): void {
-    this.send(bot.id, { type: 'CMD_DEFEND', radius });
+    this.sendOperator(bot.id, { type: 'CMD_DEFEND', radius });
   }
 
   stopDefend(bot: Bot): void {
-    this.send(bot.id, { type: 'CMD_STOP_DEFEND' });
+    this.sendOperator(bot.id, { type: 'CMD_STOP_DEFEND' });
   }
 
   avoid(bot: Bot, targetUsernames: string[], triggerRadius: number): void {
-    this.send(bot.id, { type: 'CMD_AVOID', usernames: targetUsernames, radius: triggerRadius });
+    this.sendOperator(bot.id, { type: 'CMD_AVOID', usernames: targetUsernames, radius: triggerRadius });
   }
 
   stopAvoid(bot: Bot): void {
-    this.send(bot.id, { type: 'CMD_STOP_AVOID' });
+    this.sendOperator(bot.id, { type: 'CMD_STOP_AVOID' });
   }
 
   // ── Resources ─────────────────────────────────────────────────────────────
 
-  collect(bot: Bot, blockName: string, count: number, _onFull?: DepositFn): Promise<void> {
-    return this.sendAsync(bot.id, reqId => ({ type: 'CMD_COLLECT', reqId, blockName, count }));
+  collect(bot: Bot, blockName: string | string[], count: number, _onFull?: DepositFn): Promise<void> {
+    const name = Array.isArray(blockName) ? blockName.join(',') : blockName;
+    return this.sendOperatorAsync(bot.id, reqId => ({ type: 'CMD_COLLECT', reqId, blockName: name, count }));
   }
 
   collectVein(bot: Bot, blockName: string, count: number, _onFull?: DepositFn): Promise<void> {
-    return this.sendAsync(bot.id, reqId => ({ type: 'CMD_COLLECT_VEIN', reqId, blockName, count }));
+    return this.sendOperatorAsync(bot.id, reqId => ({ type: 'CMD_COLLECT_VEIN', reqId, blockName, count }));
   }
 
   quarryFromQueue(_bot: Bot, _queue: QuarryQueue, _onFull?: DepositFn): Promise<void> {
@@ -255,14 +279,14 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
   }
 
   depositAll(bot: Bot, chestPos: Vec3): Promise<void> {
-    return this.sendAsync(bot.id, reqId => ({
+    return this.sendOperatorAsync(bot.id, reqId => ({
       type: 'CMD_DEPOSIT_ALL', reqId,
       chestPos: { x: chestPos.x, y: chestPos.y, z: chestPos.z },
     }));
   }
 
   withdraw(bot: Bot, chestPos: Vec3, itemName: string, count: number): Promise<number> {
-    return this.sendAsync<number>(bot.id, reqId => ({
+    return this.sendOperatorAsync<number>(bot.id, reqId => ({
       type: 'CMD_WITHDRAW', reqId,
       chestPos: { x: chestPos.x, y: chestPos.y, z: chestPos.z },
       itemName, count,
@@ -279,31 +303,31 @@ export class WorkerCommandAdapter extends EventEmitter implements IBotAdapter {
   // ── Inventory ─────────────────────────────────────────────────────────────
 
   equip(bot: Bot, itemName: string): Promise<void> {
-    return this.sendAsync(bot.id, reqId => ({ type: 'CMD_EQUIP', reqId, itemName }));
+    return this.sendOperatorAsync(bot.id, reqId => ({ type: 'CMD_EQUIP', reqId, itemName }));
   }
 
   eat(bot: Bot): Promise<void> {
-    return this.sendAsync(bot.id, reqId => ({ type: 'CMD_EAT', reqId }));
+    return this.sendOperatorAsync(bot.id, reqId => ({ type: 'CMD_EAT', reqId }));
   }
 
   // ── Farm / Explore ────────────────────────────────────────────────────────
 
   farm(bot: Bot, centerX: number, centerZ: number, radius: number): Promise<void> {
-    this.send(bot.id, { type: 'CMD_FARM', centerX, centerZ, radius });
+    this.sendOperator(bot.id, { type: 'CMD_FARM', centerX, centerZ, radius });
     return Promise.resolve();
   }
 
   stopFarm(bot: Bot): void {
-    this.send(bot.id, { type: 'CMD_STOP_FARM' });
+    this.sendOperator(bot.id, { type: 'CMD_STOP_FARM' });
   }
 
   explore(bot: Bot, direction: 'north' | 'south' | 'east' | 'west' | 'auto'): Promise<void> {
-    this.send(bot.id, { type: 'CMD_EXPLORE', direction });
+    this.sendOperator(bot.id, { type: 'CMD_EXPLORE', direction });
     return Promise.resolve();
   }
 
   stopExplore(bot: Bot): void {
-    this.send(bot.id, { type: 'CMD_STOP_EXPLORE' });
+    this.sendOperator(bot.id, { type: 'CMD_STOP_EXPLORE' });
   }
 
   // ── Orchestrator API ──────────────────────────────────────────────────────
